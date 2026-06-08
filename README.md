@@ -123,12 +123,14 @@ The macOS reference app organizes everything behind a single sidebar
 | **Data Sources** | One-tap import of a WHOOP CSV export or an Apple Health export, plus live-strap status. "Bring your history in once, then it's yours." |
 | **Notifications** | Configure local notifications and thresholds (`Strand/Data/NotificationSettingsStore.swift`). |
 | **Automations** | Turn the strap's physical inputs and live biometrics into Mac actions — all on-device (see below). |
-| **Settings** | Profile, preferences, and app configuration. |
+| **Coach** | An optional **AI Coach** you can ask about your data in plain language. It's the one feature that ever uses the network: off until you add your own OpenAI/Anthropic key, and it sends only a short text summary of recent metrics plus your question — never raw streams or identifiers. On the sandboxed macOS build it's blocked by the App Sandbox (no network entitlement); it works on Android. See [`docs/PRIVACY_SECURITY.md`](docs/PRIVACY_SECURITY.md). |
+| **Settings** | Profile, preferences, the in-app **What's new** changelog, and an opt-in **Experimental** section (WHOOP 5/MG protocol probes). |
 | **Support** | Attribution + **optional** crypto donations. The whole app works without them. |
 
 There is also a **menu-bar extra** (`Strand/MenuBar/MenuBarContent.swift`) with a
-glanceable live HR readout and a compact popover, and a first-run **onboarding
-wizard** (`Strand/Onboarding/OnboardingWizard.swift`).
+glanceable live HR readout and a compact popover, a first-run **onboarding wizard**
+that sets expectations (independent/experimental, WHOOP 4.0 vs 5/MG, on-device only),
+and an in-app **"What's new"** changelog shown after each update.
 
 ### Automations (on-device)
 
@@ -160,6 +162,17 @@ import required.
 | **macOS** | ✅ Full app (`Strand/`, SwiftUI, macOS 13+). Pairs over BLE, offloads the strap's history, and scores recovery / strain / sleep on-device. The complete feature set above runs here. |
 | **Android** | ✅ Full app (`android/`, Jetpack Compose, Android 8+). Pairs over BLE, persists and scores on-device, and imports WHOOP / Apple Health / Health Connect. Grab the APK from [Releases](../../releases). |
 | **iOS** | 🟡 Libraries ready. Every package declares `.iOS(.v16)` and UI-framework code is guarded with `#if canImport(UIKit)` / `AppKit`; an iOS app target is planned. |
+
+### Strap support
+
+NOOP is an independent, **experimental** project — capable, but a work in progress.
+
+| Strap | Status |
+|---|---|
+| **WHOOP 4.0** | ✅ The tested, supported path. Live HR, recovery, strain, sleep, history offload — the full experience. |
+| **WHOOP 5.0 / MG** | 🧪 **Live heart rate works** (confirmed on real hardware). Pick "WHOOP 5.0 / MG" before connecting. Deeper 5/MG metrics (recovery, strain, sleep) are still being reverse-engineered; there's an opt-in **Settings → Experimental** toggle for 5/MG owners who want to help map the protocol. |
+
+The app always tells you what's live now versus still building, both in onboarding and on each screen.
 
 ### What to expect when you start
 
