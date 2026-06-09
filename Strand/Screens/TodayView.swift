@@ -37,7 +37,7 @@ struct TodayView: View {
     private let grid = [GridItem(.adaptive(minimum: 168), spacing: NoopMetrics.gap)]
 
     var body: some View {
-        ScreenScaffold(title: "Control Center", subtitle: dateLine) {
+        ScreenScaffold(title: "Control Center", subtitle: "\(dateLine)") {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 HealthAlertBanner()
                 if repo.today?.recovery == nil {
@@ -47,6 +47,7 @@ struct TodayView: View {
                     )
                 }
                 heroSection
+                readinessSection
                 metricsSection
                 workoutsSection
                 sourcesSection
@@ -70,6 +71,73 @@ struct TodayView: View {
             }
         }
         .animation(.easeOut(duration: 0.18), value: showingSupport)
+    }
+
+    // MARK: Readiness — on-device training-readiness synthesis (HRV / resting-HR / load).
+
+    @ViewBuilder
+    private var readinessSection: some View {
+        let r = ReadinessEngine.evaluate(days: repo.days, today: Repository.localDayKey(Date()))
+        if r.level != .insufficient {
+            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                SectionHeader("Readiness", overline: "Should you push today?")
+                NoopCard {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 10) {
+                            Circle().fill(readinessColor(r.level)).frame(width: 10, height: 10)
+                            Text(r.headline).font(StrandFont.headline)
+                                .foregroundStyle(StrandPalette.textPrimary)
+                            Spacer()
+                            if let acwr = r.acwr {
+                                Text("load \(String(format: "%.2f", acwr))")
+                                    .font(StrandFont.captionNumber)
+                                    .foregroundStyle(StrandPalette.textTertiary)
+                                    .help("Acute (7-day) vs chronic (28-day) training load. 0.8–1.3 is the sweet spot.")
+                            }
+                        }
+                        Text(r.summary).font(StrandFont.subhead)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if !r.signals.isEmpty {
+                            Divider().overlay(StrandPalette.hairline)
+                            ForEach(r.signals, id: \.key) { s in
+                                HStack(alignment: .top, spacing: 8) {
+                                    Circle().fill(flagColor(s.flag)).frame(width: 7, height: 7)
+                                        .padding(.top, 5)
+                                    Text(s.label).font(StrandFont.caption)
+                                        .foregroundStyle(StrandPalette.textSecondary)
+                                        .frame(width: 104, alignment: .leading)
+                                    Text(s.detail).font(StrandFont.caption)
+                                        .foregroundStyle(StrandPalette.textTertiary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    Spacer(minLength: 0)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    private func readinessColor(_ l: ReadinessEngine.Level) -> Color {
+        switch l {
+        case .primed:       return StrandPalette.accent
+        case .balanced:     return StrandPalette.statusPositive
+        case .strained:     return StrandPalette.statusWarning
+        case .rundown:      return StrandPalette.metricRose
+        case .insufficient: return StrandPalette.textTertiary
+        }
+    }
+
+    private func flagColor(_ f: ReadinessEngine.Flag) -> Color {
+        switch f {
+        case .good:    return StrandPalette.accent
+        case .neutral: return StrandPalette.textTertiary
+        case .watch:   return StrandPalette.statusWarning
+        case .bad:     return StrandPalette.metricRose
+        }
     }
 
     // MARK: (a) HERO — RecoveryRing + Synthesis, filling the width equally.
@@ -96,8 +164,8 @@ struct TodayView: View {
                 // Right: the plain-English read-out, equal width.
                 InsightCard(
                     category: "Recovery",
-                    status: synthesisWord(score),
-                    detail: synthesisDetail(d),
+                    status: "\(synthesisWord(score))",
+                    detail: "\(synthesisDetail(d))",
                     statusColor: score.map { StrandPalette.recoveryColor($0) } ?? StrandPalette.textTertiary
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -209,7 +277,7 @@ struct TodayView: View {
                 LazyVGrid(columns: grid, alignment: .leading, spacing: NoopMetrics.gap) {
                     ForEach(Array(workouts.prefix(6).enumerated()), id: \.offset) { _, w in
                         StatTile(
-                            label: w.sport,
+                            label: "\(w.sport)",
                             value: workoutDuration(w),
                             caption: workoutCaption(w),
                             accent: StrandPalette.strainColor(w.strain ?? 0),
@@ -251,7 +319,7 @@ struct TodayView: View {
     @ViewBuilder
     private func sourceRow(badge: String, tint: Color, present: Bool, detail: String) -> some View {
         HStack(spacing: 10) {
-            SourceBadge(badge, tint: present ? tint : StrandPalette.textTertiary)
+            SourceBadge("\(badge)", tint: present ? tint : StrandPalette.textTertiary)
             Spacer()
             Text(present ? detail : "Not connected")
                 .font(StrandFont.captionNumber)
@@ -280,25 +348,25 @@ struct TodayView: View {
         appleDays = await repo.appleDailyRows()
     }
 
-    /// Trailing-window values for a metric, with the sparse-data fallback:
-    /// if the trailing window has <2 points, fall back to ALL history so sparse
-    /// series (weight) still render a value + line instead of an empty state.
+    /// Trailing-window values for a metric — NO fall back to all history. The section is labelled a
+    /// current trend ("14-day trend"), so a stale import must not render months-old points as if they
+    /// were recent (same spirit as the #23 trailing-window fix). The window is generous enough that a
+    /// genuinely sparse-but-recent series still renders — weight uses 90 days — and the Sparkline view
+    /// already handles 0/1 points (empty / a single head dot), so no fallback is needed for layout.
+    /// `latestString` reads `.last` of this windowed series, so a value older than the window shows
+    /// "—" rather than a stale number under a Today tile (#49).
     private func sparkValues(_ key: String, source: String, window: Int) async -> [Double] {
         let all = await repo.series(key: key, source: source)   // full history, asc
         guard !all.isEmpty else { return [] }
-        let windowed = trailingWindow(all, days: window)
-        let chosen = windowed.count >= 2 ? windowed : all
-        return chosen.map { $0.value }
+        return trailingWindow(all, days: window).map { $0.value }
     }
 
-    /// Keep only points within `days` of the most recent point (parsing yyyy-MM-dd in UTC).
+    /// Keep only points within the trailing `days` CALENDAR days ending TODAY (the phone's local date).
+    /// Was anchored to the most-recent point, which on a stale import pinned the window to months-old
+    /// data shown as a current trend (issue #23). ISO yyyy-MM-dd compares chronologically.
     private func trailingWindow(_ points: [(day: String, value: Double)], days: Int) -> [(day: String, value: Double)] {
-        guard let lastDay = points.last?.day, let lastDate = Self.dayParser.date(from: lastDay) else { return points }
-        let cutoff = lastDate.addingTimeInterval(-Double(days) * 86_400)
-        return points.filter { p in
-            guard let dt = Self.dayParser.date(from: p.day) else { return false }
-            return dt >= cutoff
-        }
+        let cutoffKey = Repository.localDayKey(Calendar.current.date(byAdding: .day, value: -(days - 1), to: Date()) ?? Date())
+        return points.filter { $0.day >= cutoffKey }
     }
 
     /// Latest value of a loaded sparkline series, formatted — for tiles whose hero

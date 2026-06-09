@@ -160,12 +160,22 @@ object WhoopCsvImporter {
                     while (entry != null) {
                         if (!entry.isDirectory) {
                             val base = baseName(entry.name).lowercase()
-                            if (base in wanted && !result.containsKey(base)) {
+                            // Only inspect CSVs (skip the export's GPX/ECG/other files).
+                            if (base.endsWith(".csv")) {
                                 val declared = entry.size // -1 when unknown
                                 if (declared <= MAX_ENTRY_BYTES) {
                                     val bytes = zis.readEntryCapped(MAX_ENTRY_BYTES)
                                     if (bytes != null && bytes.isNotEmpty()) {
-                                        result[base] = bytes
+                                        // Route by English name, then a localized filename alias
+                                        // (e.g. German Schlaf.csv), then by header content. This is
+                                        // what lets non-English WHOOP exports import (issue #3).
+                                        val canonical = when {
+                                            base in wanted -> base
+                                            else -> localizedAlias(base) ?: sniffCsvKind(bytes)
+                                        }
+                                        if (canonical != null && !result.containsKey(canonical)) {
+                                            result[canonical] = bytes
+                                        }
                                     }
                                 }
                             }
@@ -183,6 +193,7 @@ object WhoopCsvImporter {
         val name = displayName(context, uri)?.lowercase()
         val routed = when {
             name != null && baseName(name) in wanted -> baseName(name)
+            name != null && localizedAlias(baseName(name)) != null -> localizedAlias(baseName(name))
             else -> sniffCsvKind(firstBytes)
         }
         if (routed != null) {
@@ -209,6 +220,21 @@ object WhoopCsvImporter {
             "sleep_onset" in h || "asleep_duration_min" in h -> SLEEPS_NAME
             else -> null
         }
+    }
+
+    /**
+     * Map a known localized WHOOP export filename to its canonical English name. WHOOP localizes
+     * the CSV filenames in non-English exports (issue #3), so a German export ships Schlaf.csv,
+     * Trainings.csv, physiologische_zyklen.csv and logbuch_eintraege.csv. Header-content sniffing
+     * still covers any language whose column headers stay English.
+     */
+    private fun localizedAlias(base: String): String? = when (base) {
+        // German (app.whoop.com → Daten exportieren)
+        "physiologische_zyklen.csv" -> CYCLES_NAME
+        "schlaf.csv" -> SLEEPS_NAME
+        "trainings.csv" -> WORKOUTS_NAME
+        "logbuch_eintraege.csv" -> JOURNAL_NAME
+        else -> null
     }
 
     private fun baseName(path: String): String {

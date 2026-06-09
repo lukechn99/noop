@@ -10,7 +10,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -42,6 +46,14 @@ private const val HR_MAX_DEFAULT = 190
 fun HealthScreen(vm: AppViewModel) {
     val live by vm.live.collectAsStateWithLifecycle()
     val today by vm.today.collectAsStateWithLifecycle()
+
+    // Health Monitor shows live HR too, so it must keep the realtime stream on while it's visible —
+    // otherwise leaving the Live page stopped the stream and this page froze (issue #18). Ref-counted
+    // in the ViewModel, so handing off between Live and here never drops the stream.
+    DisposableEffect(Unit) {
+        vm.requestRealtimeHr()
+        onDispose { vm.releaseRealtimeHr() }
+    }
 
     val displayHr = displayHr(live)
     val hasLiveHr = displayHr != null
@@ -92,9 +104,12 @@ private fun hrZone(fraction: Double): Int = when {
     else -> 5
 }
 
-/** A short HR series for the hero chart, derived from streamed R-R intervals (newest
- *  last). Falls back to a flat pair at the current HR when R-R is sparse. */
-private fun hrSeries(live: LiveState, hr: Int?): List<Double> {
+/** A short HR series for the hero chart. Prefers the accumulated live-HR history (which moves over
+ *  time); falls back to per-beat HR from R-R, then to a flat pair while the buffer fills. The old
+ *  version derived ONLY from R-R, which is sparse on WHOOP 4, so it sat on a flat 2-point line even
+ *  while HR was clearly changing (issue #18). */
+private fun hrSeries(history: List<Int>, live: LiveState, hr: Int?): List<Double> {
+    if (history.size > 1) return history.map { it.toDouble() }
     val beats = live.rr.takeLast(60).mapNotNull { rr ->
         if (rr > 0) 60_000.0 / rr else null
     }
@@ -112,7 +127,16 @@ private fun HeartRateSection(live: LiveState) {
     val derived = hrIsDerived(live)
     val fraction = hrFraction(displayHr)
     val zone = hrZone(fraction)
-    val series = hrSeries(live, displayHr)
+    // Accumulate the streamed HR over time so the hero chart actually moves (issue #18 — it used to
+    // derive from sparse R-R and flat-line). Lives in UI state; resets when you leave the screen.
+    val hrHistory = remember { mutableStateListOf<Int>() }
+    LaunchedEffect(displayHr) {
+        displayHr?.let { if (it in 30..220) {
+            hrHistory.add(it)
+            if (hrHistory.size > 90) hrHistory.removeAt(0)
+        } }
+    }
+    val series = hrSeries(hrHistory, live, displayHr)
     val zoneColor = Palette.hrZoneColor(zone)
 
     Column(verticalArrangement = Arrangement.spacedBy(Metrics.gap)) {

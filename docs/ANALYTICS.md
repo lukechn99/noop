@@ -1,6 +1,6 @@
 # NOOP Analytics
 
-On-device analytics for **NOOP** — a standalone, fully offline companion app for WHOOP straps (4.0 and 5.0). NOOP talks to *your own* strap over Bluetooth, stores everything locally in SQLite, and computes recovery, strain, HRV, and sleep on-device. There is no cloud, no account, and no subscription involved in any of the math described here.
+On-device analytics for **NOOP** — a standalone, fully offline companion app for WHOOP straps (4.0 and 5.0). NOOP talks to *your own* strap over Bluetooth, stores everything locally in SQLite, and computes recovery, strain, HRV, and sleep on-device. There is no cloud and no account involved in any of the math described here.
 
 > **Not affiliated with WHOOP.** NOOP interoperates with hardware and data you already own. The metrics below are **approximations** of common exercise-physiology and HRV methods, derived from published literature — they are **not** reproductions of any proprietary scoring model, and they are **not a medical device**. Nothing here is medical advice.
 
@@ -438,4 +438,4 @@ Apple Health XML ──┘                                         │
 - **Robust statistics.** z-scores use EWMA mean-absolute-deviation (`× 1.253` to a Gaussian σ); resting HR uses 5-minute bin minima; HR display uses windowed medians — all chosen to resist single-sample outliers.
 - **Cold-start honesty.** When a baseline isn't trustworthy yet, the recovery scorer returns `nil` rather than a fabricated number.
 - **Not a medical device.** None of this is diagnostic or medical advice. The illness early-warning is a wellness nudge from your own baselines, not a clinical screen.
-- **Not affiliated with WHOOP.** NOOP interoperates with hardware and exports you already own, entirely on-device. Protocol decoding builds on open-source reverse-engineering of the WHOOP 4.0 (project *my-whoop*, `johnmiddleton12/my-whoop`) and WHOOP 5.0 (project *goose*, `b-nnett/goose`) protocols.
+- **Not affiliated with WHOOP.** NOOP interoperates with hardware and exports you already own, entirely on-device. Protocol decoding builds on community reverse-engineering of the WHOOP 4.0 (project *my-whoop*, `johnmiddleton12/my-whoop`) and WHOOP 5.0 (project *goose*, `b-nnett/goose`) protocols.

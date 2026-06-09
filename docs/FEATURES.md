@@ -1,10 +1,11 @@
 # NOOP — Feature Guide
 
 NOOP is a standalone, fully **offline** companion app for WHOOP straps (4.0 and 5.0). It pairs
-directly with the strap over Bluetooth Low Energy — **no WHOOP account, no subscription, no
+directly with the strap over Bluetooth Low Energy — **no WHOOP account, no
 cloud** — stores everything on-device in SQLite, imports your WHOOP and Apple Health exports,
 and computes recovery, strain, HRV and sleep locally. The macOS app (in `Strand/`) is the
-reference implementation; iOS and Android apps are planned.
+reference implementation; Android (in `android/`) is a full, shipped app, and iOS is an
+experimental, build-from-source community port ([PR #42](../../../pull/42)).
 
 > **Not affiliated with WHOOP.** NOOP is independent interoperability software for *your own*
 > device and *your own* data. "WHOOP" is used only to identify the hardware NOOP talks to.
@@ -12,7 +13,7 @@ reference implementation; iOS and Android apps are planned.
 > respiration, skin temperature) is an approximation, not a clinical reading, and must not be
 > used to diagnose, treat or make health decisions.
 
-NOOP is built on open-source reverse-engineering work, with thanks to:
+NOOP is built on community reverse-engineering work, with thanks to:
 
 | Project | Contribution |
 | --- | --- |
@@ -451,7 +452,7 @@ needs at least 14 days of history. It is informational only — **not** a diagno
   manual override). These power your zones, calorie estimates and recovery baselines.
 - **Strap** — connection status, battery, and Re-scan / Disconnect controls.
 - **About** — version, the "all your data, none of the cloud" note, a **medical disclaimer**, and
-  attribution to the open-source protocols NOOP is built on.
+  attribution to the community protocols NOOP is built on.
 
 ---
 
@@ -470,10 +471,10 @@ feed, refresh battery, scan/reconnect, or disconnect.
 
 `SupportView.swift`:
 
-- **Built on** — credit to the open-source reverse-engineering projects NOOP stands on.
+- **Built on** — credit to the community reverse-engineering projects NOOP stands on.
 - **Donate (optional)** — never a paywall; the whole app works without it. Copy-to-clipboard
   crypto addresses (Bitcoin, Cardano, Ethereum, XRP) for anyone who wants to chip in toward
-  future work (Windows, the Android app, new features). The app never asks again.
+  future work (Windows, the iOS port, new features). The app never asks again.
 - A reminder: **not affiliated with WHOOP; interoperability software for your own device and
   data; not a medical device.**
 

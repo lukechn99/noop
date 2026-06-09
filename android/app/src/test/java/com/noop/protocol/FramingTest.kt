@@ -66,6 +66,56 @@ class FramingTest {
         assertEquals(wantCrc32, gotCrc32)
     }
 
+    // MARK: - puffinCommandFrame (EXPERIMENTAL WHOOP 5.0/MG)
+
+    @Test
+    fun puffinCommandFrame_roundTripsThroughWhoop5Parse() {
+        // EXPERIMENTAL: a puffin TOGGLE_REALTIME_HR(3) probe, payload [1], seq 7. The CRC16 header +
+        // CRC32 payload must both verify when parsed as a WHOOP5 frame (parseWhoop5 reports crcOk).
+        val frame = Framing.puffinCommandFrame(
+            cmd = CommandNumber.TOGGLE_REALTIME_HR.rawValue,
+            seq = 7,
+            payload = byteArrayOf(1),
+        )
+        val r = Framing.parseFrame(frame, DeviceFamily.WHOOP5)
+        assertTrue(r.ok)
+        assertEquals(true, r.crcOk)
+        // Inner record starts at offset 8: [type=35][seq=7][cmd=3][payload=1].
+        assertEquals(PacketType.COMMAND.rawValue, frame[8].toInt() and 0xFF)
+        assertEquals(7, frame[9].toInt() and 0xFF)
+        assertEquals(CommandNumber.TOGGLE_REALTIME_HR.rawValue, frame[10].toInt() and 0xFF)
+        assertEquals(1, frame[11].toInt() and 0xFF)
+    }
+
+    @Test
+    fun puffinCommandFrame_envelopeShapeAndCrcsAreSelfConsistent() {
+        val frame = Framing.puffinCommandFrame(
+            cmd = CommandNumber.TOGGLE_REALTIME_HR.rawValue,
+            seq = 1,
+            payload = byteArrayOf(1),
+        )
+        // SOF 0xAA, format byte 0x01.
+        assertEquals(0xAA.toByte(), frame[0])
+        assertEquals(0x01.toByte(), frame[1])
+        // declaredLength = inner(3+1=4) + 4 = 8; total frame = declaredLength + 8.
+        val declLen = (frame[2].toInt() and 0xFF) or ((frame[3].toInt() and 0xFF) shl 8)
+        assertEquals(8, declLen)
+        assertEquals(declLen + 8, frame.size)
+        // CRC16-Modbus over frame[0..6) is stored LE at frame[6..8).
+        val wantHeader = Crc.crc16Modbus(frame.copyOfRange(0, 6))
+        val gotHeader = (frame[6].toInt() and 0xFF) or ((frame[7].toInt() and 0xFF) shl 8)
+        assertEquals(wantHeader, gotHeader)
+        // CRC32 over the inner record frame[8 until total-4) is stored LE in the last 4 bytes.
+        val payloadEnd = frame.size - 4
+        val inner = frame.copyOfRange(8, payloadEnd)
+        val wantCrc32 = Crc.crc32(inner)
+        val gotCrc32 = (frame[payloadEnd].toLong() and 0xFFL) or
+            ((frame[payloadEnd + 1].toLong() and 0xFFL) shl 8) or
+            ((frame[payloadEnd + 2].toLong() and 0xFFL) shl 16) or
+            ((frame[payloadEnd + 3].toLong() and 0xFFL) shl 24)
+        assertEquals(wantCrc32, gotCrc32)
+    }
+
     // MARK: - parseFrame decode vectors
 
     @Test
@@ -190,6 +240,34 @@ class FramingTest {
         assertArrayEquals(frame, out[0])
     }
 
+    @Test
+    fun reassembler_garbageLengthDoesNotStall_resyncsToNextFrame() {
+        // A misaligned/corrupt SOF with an impossibly large declared length (0xFFFF -> 65539 bytes)
+        // must NOT wedge the stream waiting for bytes that can never arrive over BLE. The reassembler
+        // should drop the bad SOF and recover the real frame that follows. (This is the live-HR-freeze
+        // failure mode: without the guard, every later frame — including HR — is silently dropped.)
+        val good = Framing.buildCommand(CommandNumber.GET_BATTERY_LEVEL, byteArrayOf(0), seq = 0)
+        val garbage = byteArrayOf(0xAA.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0x00)
+        val r = Reassembler()
+        val out = r.feed(garbage + good)
+        assertEquals(1, out.size)
+        assertArrayEquals(good, out[0])
+    }
+
+    @Test
+    fun reassembler_resetDropsPartialFrame() {
+        // reset() (called on every reconnect) must discard a buffered half-frame, so the stale bytes
+        // can't corrupt the first frame of the next session.
+        val frame = Framing.buildCommand(CommandNumber.GET_BATTERY_LEVEL, byteArrayOf(0), seq = 0)
+        val r = Reassembler()
+        val cut = frame.size / 2
+        assertTrue(r.feed(frame.copyOfRange(0, cut)).isEmpty())
+        r.reset()
+        val out = r.feed(frame)
+        assertEquals(1, out.size)
+        assertArrayEquals(frame, out[0])
+    }
+
     // MARK: - enum fromRaw
 
     @Test
@@ -218,5 +296,38 @@ class FramingTest {
         assertEquals(2, streams.rr.size)
         assertEquals(RrInterval(ts = 1700000000, rrMs = 850), streams.rr[0])
         assertEquals(RrInterval(ts = 1700000000, rrMs = 870), streams.rr[1])
+    }
+
+    // MARK: - WHOOP 5.0/MG REALTIME_DATA (+4) + family-aware reassembly
+
+    private fun fromHex(s: String): ByteArray =
+        ByteArray(s.length / 2) { ((s[it * 2].digitToInt(16) shl 4) or s[it * 2 + 1].digitToInt(16)).toByte() }
+
+    /** A real type-40 REALTIME_DATA frame from a worn WHOOP 5 (same vector as the Swift
+     *  Whoop5RealtimeTests): hr=98, rr=[603,587] ms, ts=1780916382. HR matched the 0x2A37 profile. */
+    private val whoop5RealtimeHex =
+        "aa011800010022e128029ea0266aae4762025b024b020000000001005ed515dc"
+
+    @Test
+    fun whoop5_realtimeData_decodesHrRrAtPlus4() {
+        val f = Framing.parseFrame(fromHex(whoop5RealtimeHex), DeviceFamily.WHOOP5)
+        assertTrue(f.ok)
+        assertEquals("REALTIME_DATA", f.typeName)
+        assertEquals(true, f.crcOk)
+        assertEquals(98, f.parsed["heart_rate"])          // 4.0 @12 → 5.0 @16
+        assertEquals(1780916382, f.parsed["timestamp"])   // 4.0 @6  → 5.0 @10
+        @Suppress("UNCHECKED_CAST")
+        assertEquals(listOf(603, 587), f.parsed["rr_intervals"] as List<Int>)
+    }
+
+    @Test
+    fun whoop5_reassembler_isFamilyAware() {
+        // The WHOOP4 length rule decodes a bogus ~6 KB length for a 5/MG frame and never emits; the
+        // family-aware reassembler frames it correctly (declLen @[2..4], total + 8).
+        val frame = fromHex(whoop5RealtimeHex)
+        val out = Reassembler(DeviceFamily.WHOOP5).feed(frame)
+        assertEquals(1, out.size)
+        assertArrayEquals(frame, out[0])
+        assertTrue(Reassembler(DeviceFamily.WHOOP4).feed(frame).isEmpty())
     }
 }

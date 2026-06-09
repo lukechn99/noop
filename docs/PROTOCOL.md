@@ -6,8 +6,8 @@ frame envelope, checksums, packet/command/event enumerations, the bond handshake
 historical-data offload state machine.
 
 NOOP is a standalone, fully offline companion. It pairs over BLE, decodes the strap's own
-streams on-device, and stores everything locally in SQLite. There is no cloud, account, or
-subscription involved in any of the exchanges described here.
+streams on-device, and stores everything locally in SQLite. There is no cloud or account
+involved in any of the exchanges described here.
 
 > **Interoperability & safety note.** This describes interoperation with the user's *own*
 > device and the data it already holds. NOOP is **not affiliated with, authorized by, or
@@ -20,7 +20,7 @@ The protocol decoder is platform-pure Swift in the `WhoopProtocol` package
 (`Packages/WhoopProtocol/`); it never imports CoreBluetooth, so it runs unchanged in tests and
 CLI tools. The CoreBluetooth transport lives in the macOS app target under `Strand/BLE/`.
 
-This work builds on two open-source reverse-engineering efforts:
+This work builds on two community reverse-engineering efforts:
 
 - **`johnmiddleton12/my-whoop`** — WHOOP 4.0 protocol.
 - **`b-nnett/goose`** — WHOOP 5.0 ("puffin") protocol.

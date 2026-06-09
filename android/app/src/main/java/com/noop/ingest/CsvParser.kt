@@ -48,7 +48,10 @@ internal object HeaderNorm {
      *   "Recovery score %"            -> "recovery_score_pct"
      */
     fun normalize(header: String): String {
-        var s = header.lowercase().trim()
+        // Fold diacritics first so localized headers normalize deterministically (ä->a, ö->o,
+        // ü->u), regardless of NFC/NFD form. English headers are unaffected. (issue #3)
+        var s = java.text.Normalizer.normalize(header.lowercase().trim(), java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{Mn}+"), "")
         s = s.replace("%", "pct")
         val out = StringBuilder(s.length)
         var lastWasUnderscore = false
@@ -68,8 +71,56 @@ internal object HeaderNorm {
         var result = out.toString()
         while (result.startsWith("_")) result = result.substring(1)
         while (result.endsWith("_")) result = result.substring(0, result.length - 1)
-        return result
+        // Map localized column headers onto the canonical English keys the parsers look up. (issue #3)
+        return foreignAliases[result] ?: result
     }
+
+    /**
+     * Localized WHOOP export column headers -> canonical English normalized keys. Keys are the
+     * diacritic-folded normalized form of the foreign header. German added from a real export
+     * (issue #3); more languages can be appended here. Mirrors the Swift HeaderNorm.foreignAliases.
+     */
+    private val foreignAliases: Map<String, String> = mapOf(
+        "startzeit_des_zyklus" to "cycle_start_time",
+        "endzeit_des_zyklus" to "cycle_end_time",
+        "zeitzone_des_zyklus" to "cycle_timezone",
+        "erholungswert_pct" to "recovery_score_pct",
+        "ruheherzfrequenz_schlage_pro_minute" to "resting_heart_rate_bpm",
+        "herzfrequenzvariabilitat_ms" to "heart_rate_variability_ms",
+        "hauttemperatur_celsius" to "skin_temp_celsius",
+        "blutsauerstoff_pct" to "blood_oxygen_pct",
+        "tagesbelastung" to "day_strain",
+        "verbrannte_energie_cal" to "energy_burned_cal",
+        "max_hf_schlage_pro_minute" to "max_hr_bpm",
+        "durchschnittliche_hf_schlage_pro_minute" to "average_hr_bpm",
+        "beginn_des_schlafs" to "sleep_onset",
+        "beginn_des_aufwachens" to "wake_onset",
+        "schlafleistung_pct" to "sleep_performance_pct",
+        "atemfrequenz_atemzuge_min" to "respiratory_rate_rpm",
+        "schlafdauer_min" to "asleep_duration_min",
+        "dauer_im_bett_min" to "in_bed_duration_min",
+        "dauer_des_leichtschlafs_min" to "light_sleep_duration_min",
+        "dauer_des_tiefschlafs_min" to "deep_sws_duration_min",
+        "dauer_des_rem_schlafs_min" to "rem_duration_min",
+        "dauer_des_aufwachens_min" to "awake_duration_min",
+        "schlafbedarf_min" to "sleep_need_min",
+        "schlafdefizit_min" to "sleep_debt_min",
+        "schlafeffizienz_pct" to "sleep_efficiency_pct",
+        "schlafbestandigkeit_pct" to "sleep_consistency_pct",
+        "nickerchen" to "nap",
+        "startzeit_des_trainings" to "workout_start_time",
+        "endzeit_des_trainings" to "workout_end_time",
+        "name_der_aktivitat" to "activity_name",
+        "aktivitatsbelastung" to "activity_strain",
+        "hf_zone_1_pct" to "hr_zone_1_pct",
+        "hf_zone_2_pct" to "hr_zone_2_pct",
+        "hf_zone_3_pct" to "hr_zone_3_pct",
+        "hf_zone_4_pct" to "hr_zone_4_pct",
+        "hf_zone_5_pct" to "hr_zone_5_pct",
+        "fragetext" to "question_text",
+        "beantwortet_mit_ja" to "answered_yes_no",
+        "anmerkungen" to "notes",
+    )
 }
 
 // MARK: - Tolerant CSV reader

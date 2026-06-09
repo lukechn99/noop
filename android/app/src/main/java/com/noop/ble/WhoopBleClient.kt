@@ -67,12 +67,19 @@ data class LiveState(
     val heartRate: Int? = null,
     val rr: List<Int> = emptyList(),
     val batteryPct: Double? = null,
-    val worn: Boolean = false,
+    /** Wrist-wear from WRIST_ON/WRIST_OFF events. Defaults TRUE to match the macOS LiveState (Swift
+     *  parity) — assume worn until the strap says otherwise. (Was false, which made the UI show
+     *  "Worn: Off" forever when no WRIST_ON event arrived — issue #18.) */
+    val worn: Boolean = true,
     val lastEvent: String? = null,
     /** True while actively scanning for the strap (so the UI can show "Searching…"). */
     val scanning: Boolean = false,
     /** Human-readable reason for the current state (why it can't connect, what to try). */
     val statusNote: String? = null,
+    /** A WHOOP 5/MG strap was found. It connects and its battery reads, but live data needs an
+     *  MG secure handshake that isn't supported yet — so the UI explains that honestly instead of
+     *  showing the generic "charge it and put it on" checklist. */
+    val whoop5Detected: Boolean = false,
 )
 
 /**
@@ -122,10 +129,18 @@ class WhoopBleClient(
     private val deviceId: String = "my-whoop",
     /** Durable trim-cursor store for the offload safe-trim watermark (see [Backfiller]). */
     private val cursorStore: TrimCursorStore = PrefsTrimCursorStore(context),
+    /**
+     * Opt-in switch for the EXPERIMENTAL WHOOP 5.0/MG ("puffin") protocol probes (default OFF).
+     * Read fresh from SharedPreferences each connect so a Settings toggle takes effect on the next
+     * scan. Port of the macOS `PuffinExperiment` gate. NEVER consulted for WHOOP 4.0.
+     */
+    private val puffinExperiment: PuffinExperiment = PuffinExperiment.from(context),
 ) {
 
     companion object {
         private const val TAG = "WhoopBleClient"
+        /** Cap on the in-app strap-log ring buffer (for the "Share strap log" diagnostics export). */
+        private const val LOG_BUFFER_MAX = 2000
 
         // MARK: GATT UUIDs (authoritative, from BLEManager.swift / FINDINGS.md).
         //
@@ -139,6 +154,17 @@ class WhoopBleClient(
         private val DATA_NOTIFY_CHAR: UUID = UUID.fromString("61080005-8d6d-82b8-614a-1c8cb0f8dcc6")  // data (fragmented)
 
         val WHOOP5_SERVICE: UUID = UUID.fromString("fd4b0001-cce1-4033-93ce-002d5875f58a")
+        // WHOOP 5.0/MG command-write char — takes the static CLIENT_HELLO (EXPERIMENTAL).
+        val WHOOP5_CMD_WRITE_CHAR: UUID = UUID.fromString("fd4b0002-cce1-4033-93ce-002d5875f58a")
+        // WHOOP 5.0/MG ("puffin") notify chars — realtime HR rides these as REALTIME_DATA frames, NOT
+        // the standard 0x2A37 profile. They require an encrypted/bonded link, so they're subscribed
+        // only AFTER the CLIENT_HELLO confirmed-write bonds (mirrors macOS whoop5NotifyChars). (#17)
+        private val WHOOP5_NOTIFY_CHARS: List<UUID> = listOf(
+            UUID.fromString("fd4b0003-cce1-4033-93ce-002d5875f58a"),
+            UUID.fromString("fd4b0004-cce1-4033-93ce-002d5875f58a"),
+            UUID.fromString("fd4b0005-cce1-4033-93ce-002d5875f58a"),
+            UUID.fromString("fd4b0007-cce1-4033-93ce-002d5875f58a"),
+        )
 
         // Standard BLE profiles. HR + R-R works UNBONDED; battery is a plain %.
         private val HEART_RATE_SERVICE: UUID = UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb")
@@ -171,6 +197,21 @@ class WhoopBleClient(
         private const val BACKFILL_IDLE_TIMEOUT_MS = 60_000L
         /** Deferral before the first connect-time offload, so SET_CLOCK/GET_DATA_RANGE round-trip first. */
         private const val INITIAL_BACKFILL_DELAY_MS = 1_500L
+
+        // MARK: Live-stream keep-alive (port of BLEManager.keepAlive*). The WHOOP firmware lets the
+        // realtime HR stream lapse if it isn't re-armed, so a stuck-on-stale HR that only a manual
+        // disconnect/reconnect fixes is really a missing keep-alive. We re-arm + poll battery every
+        // 30s, and bounce a truly silent link after 120s (the auto version of disconnect+reconnect).
+        private const val KEEPALIVE_INTERVAL_MS = 30_000L
+        /** No inbound data for this long ⇒ the link/stream stalled; bounce it to resume streaming. */
+        private const val KEEPALIVE_STALL_MS = 120_000L
+        /** Stream gone quiet this long (but not yet stall) ⇒ re-subscribe in case a CCCD silently dropped. */
+        private const val KEEPALIVE_QUIET_MS = 45_000L
+
+        /** A CCCD write can transiently return BUSY if the stack slot hasn't freed yet; retry the same
+         *  subscribe a few times (short backoff) before giving up, rather than dropping the stream. */
+        private const val CCCD_RETRY_DELAY_MS = 60L
+        private const val MAX_CCCD_RETRIES = 8
 
         /**
          * True when a frame is part of the historical offload (HISTORICAL_DATA=47, EVENT=48,
@@ -221,8 +262,9 @@ class WhoopBleClient(
     private var gatt: BluetoothGatt? = null
     private var cmdCharacteristic: BluetoothGattCharacteristic? = null
 
-    /** Frame reassembler for the fragmented custom notify chars (port of Reassembler). */
-    private val reassembler = Reassembler()
+    /** Frame reassembler for the fragmented custom notify chars (port of Reassembler). Reassigned per
+     *  connection with the detected family — WHOOP5/MG frames use a different length encoding. */
+    private var reassembler = Reassembler()
 
     /** Rolling command sequence byte; `seq = seq &+ 1` before each send (Swift `seq: UInt8`). */
     private var seq: Int = 0
@@ -233,14 +275,43 @@ class WhoopBleClient(
     /** Runs the connect handshake EXACTLY ONCE per connection (Swift `connectHandshakeDone`). */
     private var connectHandshakeDone = false
 
-    /** True when the user asked to disconnect; suppresses the auto-rescan (Swift `intentionalDisconnect`). */
+    /** True when the user asked to disconnect; suppresses the auto-rescan (Swift `intentionalDisconnect`).
+     *  Written on the main looper (connect/disconnect/keep-alive bounce) and read on the GATT binder
+     *  thread (handleDisconnect), so it must be @Volatile for cross-thread visibility. */
+    @Volatile
     private var intentionalDisconnect = false
+    /// The strap family the user chose to pair, remembered so an auto-reconnect after a
+    /// dropout re-scans for the same model instead of falling back to WHOOP 4.0.
+    private var selectedModel = WhoopModel.WHOOP4
+    /// The family actually discovered on the connected peripheral. Drives family-aware frame
+    /// parsing and gates the WHOOP4-only bond/handshake. Set in onServicesDiscovered.
+    private var connectedFamily = DeviceFamily.WHOOP4
 
     /** True while a scan is active, so we never start a second scan (Android scanner is stateful). */
     private var scanning = false
 
     /** All BLE work hops onto the main looper, matching CBCentralManager(queue: .main). */
     private val handler = Handler(Looper.getMainLooper())
+
+    /**
+     * Mirror the strap log to logcat (`Log.d`). Default OFF — a normal user has no reason to write the
+     * connection log to the system log, and shouldn't have to. The in-app ring buffer below always
+     * records regardless, so the "Share strap log" export still works for everyone (issues #17/#18);
+     * this gate only controls the adb-visible `Log.d`, which is the tool developers use to watch a
+     * connection live (`adb logcat -s WhoopBleClient`). Driven by Settings → Strap → "Debug logging"
+     * (persisted as [com.noop.ui.NoopPrefs.KEY_DEBUG_LOGGING]); the value is pushed down from the
+     * composition root so this low-level client never depends on the UI/prefs layer. @Volatile because
+     * [log] runs on both the GATT binder thread and the main looper.
+     */
+    @Volatile
+    var debugLogcat: Boolean = false
+
+    /** In-memory ring buffer of the strap log so it can be exported from the UI for bug reports.
+     *  `log()` always writes here (under [logBuffer]'s monitor); logcat mirroring is opt-in via
+     *  [debugLogcat]. Android's `Log.d` isn't reachable by a normal user, which is why the in-app
+     *  buffer + "Share strap log" exist (issues #17/#18). */
+    private val logBuffer = ArrayDeque<String>()
+    private val logTimeFmt = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
 
     /** Fired if a scan finds nothing in [SCAN_TIMEOUT_MS]; stops scanning and explains why. */
     private val scanTimeoutRunnable = Runnable {
@@ -315,6 +386,15 @@ class WhoopBleClient(
     private val periodicBackfillRunnable = Runnable { triggerPeriodicBackfill() }
     private val backfillTimeoutRunnable = Runnable { onBackfillTimeout() }
 
+    /** Live-stream keep-alive (port of BLEManager.keepAliveTimer): re-arms realtime, polls battery,
+     *  and bounces a stalled link. Handler-posted on every connect handshake; cancelled in reset(). */
+    private val keepAliveRunnable = Runnable { keepAliveFire() }
+    private var keepAliveTick = 0
+    /** True while the Live screen wants the realtime HR stream; the keep-alive re-arms it so it can't lapse. */
+    @Volatile private var wantsRealtime = false
+    /** Wall-clock of the last inbound notification — drives the keep-alive liveness watchdog. */
+    @Volatile private var lastDataAtMs = 0L
+
     /**
      * Pending outbound writes. Android's GATT stack allows ONE in-flight write at a time:
      * a second writeCharacteristic before onCharacteristicWrite silently fails. The Swift app
@@ -328,6 +408,11 @@ class WhoopBleClient(
     /** Descriptor-write queue: enabling notifications is also a one-at-a-time GATT operation. */
     private val cccdQueue = ConcurrentLinkedQueue<BluetoothGattCharacteristic>()
     private var cccdInFlight = false
+    /** Bounded retries for a transiently-BUSY CCCD write, so a single rejected subscribe doesn't
+     *  permanently kill a stream (HR/battery/events). Reset per connection in [reset]. */
+    private var cccdRetries = 0
+    /** Set once startSession() has fired the first command, so it runs exactly once per connection. */
+    private var sessionStarted = false
 
     // ====================================================================================
     // MARK: Public API  (port of BLEManager.connect / disconnect / send + buzz helper)
@@ -338,8 +423,9 @@ class WhoopBleClient(
      * Port of `BLEManager.connect()` → `central.scanForPeripherals(withServices:[customService])`.
      */
     @SuppressLint("MissingPermission")
-    fun connect() {
+    fun connect(model: WhoopModel = WhoopModel.WHOOP4) {
         intentionalDisconnect = false
+        selectedModel = model
         val adp = adapter
         // No Bluetooth LE hardware at all (most often an emulator / virtual device).
         if (adp == null || !context.packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)) {
@@ -366,20 +452,20 @@ class WhoopBleClient(
             log("Scan already in progress — ignoring")
             return
         }
-        // Filter by the WHOOP4 AND WHOOP5 service UUIDs, exactly like scanForPeripherals(withServices:).
-        // A ScanFilter list is OR-ed: a peripheral advertising either service matches.
+        // Filter to the strap the user picked — a single service, so a WHOOP 4.0
+        // scan never lingers on a WHOOP 5/MG wrist (or the reverse). The user
+        // chooses the model before this runs.
         val filters = listOf(
-            ScanFilter.Builder().setServiceUuid(ParcelUuid(WHOOP4_SERVICE)).build(),
-            ScanFilter.Builder().setServiceUuid(ParcelUuid(WHOOP5_SERVICE)).build(),
+            ScanFilter.Builder().setServiceUuid(ParcelUuid(model.service)).build(),
         )
         // LOW_LATENCY for a snappy first connect, mirroring the desktop app's eager scan.
         // We do NOT allow duplicates (CBCentralManagerScanOptionAllowDuplicatesKey: false).
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
-        log("Scanning for WHOOP service…")
+        log("Scanning for ${model.displayName}…")
         scanning = true
-        _state.value = _state.value.copy(scanning = true, statusNote = "Searching for your strap…")
+        _state.value = _state.value.copy(scanning = true, whoop5Detected = false, statusNote = "Searching for your ${model.displayName}…")
         try {
             sc.startScan(filters, settings, scanCallback)
         } catch (se: SecurityException) {
@@ -416,6 +502,17 @@ class WhoopBleClient(
     }
 
     /**
+     * Switch which strap we'll connect to next: drop the current strap and clear the **sticky** bond
+     * state so a newly-picked model bonds fresh. Without this, `bonded` stayed true from the first strap,
+     * which hid the strap picker and kept the scan pointed at the old family's service — so a user with
+     * both a WHOOP 4 and a 5/MG couldn't switch between them. Mirrors macOS BLEManager.prepareForModelSwitch.
+     */
+    fun prepareForModelSwitch() {
+        disconnect()
+        _state.value = _state.value.copy(connected = false, bonded = false)
+    }
+
+    /**
      * Send a command to the strap.
      * Port of `BLEManager.send(_:payload:writeType:)` — builds the framed COMMAND packet via
      * [Framing.buildCommand] and writes it to the command characteristic (61080002).
@@ -428,6 +525,22 @@ class WhoopBleClient(
         val ch = cmdCharacteristic
         if (gatt == null || ch == null) {
             log("send(${cmd.name}) ignored — not connected")
+            return
+        }
+        // WHOOP 5.0/MG uses puffin (CRC16) command framing, not the WHOOP4 frame. The realtime-HR toggle
+        // is hardware-confirmed (issue #17 — a 5/MG owner saw live HR on v1.13), which proves the strap
+        // acts on puffin-framed commands. We now also send haptics (buzz) on that same proven transport —
+        // experimental: the strap may or may not honor that specific command, but it's no longer a blind
+        // guess. Everything else stays dropped (offload commands need the held work). WHOOP 4.0 unaffected.
+        if (connectedFamily == DeviceFamily.WHOOP5) {
+            if (cmd != CommandNumber.TOGGLE_REALTIME_HR && cmd != CommandNumber.RUN_HAPTICS_PATTERN) {
+                log("send(${cmd.name}) skipped — no WHOOP 5/MG framing for this command yet")
+                return
+            }
+            seq = (seq + 1) and 0xFF
+            val frame = Framing.puffinCommandFrame(cmd = cmd.rawValue, seq = seq, payload = payload)
+            enqueueWrite(PendingWrite(frame, withResponse))
+            log("→ ${cmd.name} payload=${payload.toHex()} (puffin)")
             return
         }
         seq = (seq + 1) and 0xFF
@@ -446,6 +559,57 @@ class WhoopBleClient(
         val n = loops.coerceIn(0, 255)
         send(CommandNumber.RUN_HAPTICS_PATTERN, byteArrayOf(2, n.toByte(), 0, 0, 0))
         log("Buzz: patternId=2 loops=$n")
+    }
+
+    /**
+     * Read the standard Battery Level characteristic (0x2A19) on demand for "Refresh battery".
+     * WHOOP 5/MG exposes live battery here, and its proprietary GET_BATTERY_LEVEL command is dropped by
+     * send() (only HR-toggle + buzz are framed for 5/MG) — so without this the manual refresh was a no-op
+     * on 5/MG. WHOOP 4 also answers the legacy command path, so it gets both. Mirrors macOS
+     * BLEManager.refreshBattery(). The read result arrives in onCharacteristicRead → onInbound → setBattery.
+     */
+    fun refreshBattery() {
+        val g = gatt
+        if (g == null) {
+            log("refreshBattery ignored — not connected")
+            return
+        }
+        val batt = g.getService(BATTERY_SERVICE)?.getCharacteristic(BATTERY_CHAR)
+        if (batt != null && (batt.properties and BluetoothGattCharacteristic.PROPERTY_READ) != 0) {
+            g.readCharacteristic(batt)
+            log("Reading standard Battery Level (0x2A19)")
+        } else {
+            log("Battery Level read unavailable; relying on notifications")
+        }
+        if (connectedFamily == DeviceFamily.WHOOP4) send(CommandNumber.GET_BATTERY_LEVEL)
+    }
+
+    /**
+     * Arm the strap's **firmware** alarm to buzz at [epochSec] (absolute UTC seconds). The strap fires
+     * at that instant even if the phone is asleep or NOOP is closed. SET_CLOCK is sent first so the
+     * strap's RTC is UTC-correct (a wrong RTC fires the alarm at the wrong wall-clock time). Payload =
+     * `[0x01] + u32 LE epoch + [0x00, 0x00]`. Port of macOS `BLEManager.armStrapAlarm`. WHOOP 4.0; on
+     * 5/MG `send()` drops it (the 5/MG command set isn't verified for this yet).
+     */
+    fun armStrapAlarm(epochSec: Long) {
+        send(CommandNumber.SET_CLOCK, setClockPayload())
+        val e = epochSec.toInt()
+        val payload = byteArrayOf(
+            0x01,
+            (e and 0xFF).toByte(),
+            ((e shr 8) and 0xFF).toByte(),
+            ((e shr 16) and 0xFF).toByte(),
+            ((e shr 24) and 0xFF).toByte(),
+            0x00, 0x00,
+        )
+        send(CommandNumber.SET_ALARM_TIME, payload)
+        log("Alarm: armed (epoch $epochSec)")
+    }
+
+    /** Clear the strap's firmware alarm. Port of macOS `BLEManager.disableStrapAlarm`. */
+    fun disableStrapAlarm() {
+        send(CommandNumber.DISABLE_ALARM, byteArrayOf(0x01))
+        log("Alarm: disarmed")
     }
 
     // ====================================================================================
@@ -490,10 +654,29 @@ class WhoopBleClient(
         reset()
         // autoConnect = false for a fast, direct connect (CoreBluetooth central.connect default).
         // TRANSPORT_LE pins the connection to BLE on dual-mode devices.
-        gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-        } else {
-            device.connectGatt(context, false, gattCallback)
+        gatt = when {
+            // Pin EVERY GATT callback to the main looper. Without a handler, Android delivers
+            // callbacks on arbitrary binder-pool threads: onServicesDiscovered then races a
+            // concurrent callback, the CCCD queue gets drained to empty, and the bond's
+            // with-response write fires BEFORE the notification subscriptions. The bond then
+            // holds the stack's single GATT slot, so every writeDescriptor is rejected as BUSY
+            // (logged by the stack as "isCallbackThread: Failed! / Callback env fail") and the
+            // subscriptions are abandoned — leaving HR, battery, worn and events permanently
+            // empty even though the strap is bonded and commands (e.g. buzz) still work.
+            // One consistent thread serialises discovery → subscribe → bond in the right order.
+            // Gated on API 28+ (P): the handler overload exists from API 26, but the stack only
+            // reliably honours callback-thread affinity from Android 9 — which is also where this
+            // race actually reproduces. On 26/27 we keep the default (callbacks off-main), which is
+            // unchanged behaviour, so no regression and no main-thread decode on those older devices.
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.P ->
+                device.connectGatt(
+                    context, false, gattCallback, BluetoothDevice.TRANSPORT_LE,
+                    BluetoothDevice.PHY_LE_1M_MASK, handler,
+                )
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ->
+                device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+            else ->
+                device.connectGatt(context, false, gattCallback)
         }
     }
 
@@ -530,23 +713,38 @@ class WhoopBleClient(
             // delivers ALL services+characteristics in one callback, so we walk them directly.
 
             // 1. Custom service: capture the cmd-write char, FIRE THE BOND, queue the notify subs.
-            val custom = g.getService(WHOOP4_SERVICE) ?: g.getService(WHOOP5_SERVICE)
-            if (custom != null) {
-                cmdCharacteristic = custom.getCharacteristic(CMD_WRITE_CHAR)
-
-                // THE BONDING TRICK (port of didDiscoverCharacteristicsFor → cmdWriteChar branch):
-                // one CONFIRMED write of GET_BATTERY_LEVEL triggers just-works bonding. We send it
-                // directly (not via the normal queue) so it's unambiguously the first write, exactly
-                // as the Swift code writes the bond frame inline before anything else.
-                cmdCharacteristic?.let { writeBondFrame(g, it) }
-
-                // Subscribe to the three custom notify characteristics (data is fragmented).
-                custom.getCharacteristic(CMD_NOTIFY_CHAR)?.let { cccdQueue.add(it) }
-                custom.getCharacteristic(EVENT_NOTIFY_CHAR)?.let { cccdQueue.add(it) }
-                custom.getCharacteristic(DATA_NOTIFY_CHAR)?.let { cccdQueue.add(it) }
+            val whoop4 = g.getService(WHOOP4_SERVICE)
+            val whoop5 = g.getService(WHOOP5_SERVICE)
+            if (whoop4 != null) {
+                // Verified WHOOP 4.0 path: capture the cmd-write char + queue the notify subscriptions.
+                // We do NOT fire the bond write here. Android allows only ONE outstanding GATT operation,
+                // so writing the bond frame now would race the CCCD descriptor writes below and the stack
+                // would reject every subscription — the strap bonds (the confirmed write succeeds) but no
+                // notifications ever enable, so HR/battery/events stay empty (issue #12). The bond write
+                // is deferred to startSession(), which runs once every notification is on.
+                connectedFamily = DeviceFamily.WHOOP4
+                cmdCharacteristic = whoop4.getCharacteristic(CMD_WRITE_CHAR)
+                whoop4.getCharacteristic(CMD_NOTIFY_CHAR)?.let { cccdQueue.add(it) }
+                whoop4.getCharacteristic(EVENT_NOTIFY_CHAR)?.let { cccdQueue.add(it) }
+                whoop4.getCharacteristic(DATA_NOTIFY_CHAR)?.let { cccdQueue.add(it) }
+            } else if (whoop5 != null) {
+                // EXPERIMENTAL WHOOP 5.0/MG: opens with CLIENT_HELLO (sent in startSession, after the
+                // standard HR/battery notifications are enabled), not the WHOOP4 confirmed-write bond.
+                connectedFamily = DeviceFamily.WHOOP5
+                log("WHOOP 5/MG detected — will send CLIENT_HELLO after subscribing (experimental).")
+                _state.value = _state.value.copy(
+                    whoop5Detected = true,
+                    statusNote = "WHOOP 5/MG connected — experimental. After bonding, NOOP brings up live " +
+                        "heart rate from the strap's realtime stream. Deeper metrics (recovery, strain, " +
+                        "sleep) for 5/MG are still being figured out. WHOOP 4.0 is fully supported today.",
+                )
+                cmdCharacteristic = whoop5.getCharacteristic(WHOOP5_CMD_WRITE_CHAR)
             } else {
                 log("Custom WHOOP service not found on this peripheral")
             }
+            // The reassembler frames per family — 5/MG uses a different length encoding (declLen @[2..4],
+            // total +8) than WHOOP4 (length @[1..3], total +4), so it must match the connected strap.
+            reassembler = Reassembler(connectedFamily)
 
             // 2. Standard HR profile (works unbonded — the reliable HR + R-R source).
             g.getService(HEART_RATE_SERVICE)?.getCharacteristic(HEART_RATE_CHAR)?.let { cccdQueue.add(it) }
@@ -554,7 +752,8 @@ class WhoopBleClient(
             // 3. Standard battery profile (plain %).
             g.getService(BATTERY_SERVICE)?.getCharacteristic(BATTERY_CHAR)?.let { cccdQueue.add(it) }
 
-            // Drain the descriptor queue (enables notifications one at a time).
+            // Enable notifications one at a time. When the queue is fully drained, startSession() fires
+            // the first command (bond / CLIENT_HELLO) — never racing the descriptor writes.
             drainCccdQueue(g)
         }
 
@@ -566,7 +765,20 @@ class WhoopBleClient(
             // Port of didWriteValueFor: a CONFIRMED-write completion (no error) == bonding succeeded.
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 log("Confirmed write failed: status=$status")
-            } else if (!didBond) {
+            } else if (!didBond && connectedFamily == DeviceFamily.WHOOP5) {
+                // EXPERIMENTAL (issue #17): the CLIENT_HELLO is now a confirmed write, so this ACK means
+                // just-works bonding completed. Now subscribe the puffin notify chars (realtime HR rides
+                // these as REALTIME_DATA — the strap rejected them on the unauthenticated link), then arm
+                // realtime HR with puffin framing. Mirrors the macOS post-bond flow.
+                didBond = true
+                _state.value = _state.value.copy(bonded = true)
+                log("WHOOP 5/MG: CLIENT_HELLO acked — link established; subscribing notify chars (experimental).")
+                g.getService(WHOOP5_SERVICE)?.let { svc ->
+                    for (u in WHOOP5_NOTIFY_CHARS) svc.getCharacteristic(u)?.let { cccdQueue.add(it) }
+                }
+                drainCccdQueue(g)
+                if (wantsRealtime) send(CommandNumber.TOGGLE_REALTIME_HR, byteArrayOf(1))
+            } else if (!didBond && connectedFamily == DeviceFamily.WHOOP4) {
                 didBond = true
                 _state.value = _state.value.copy(bonded = true)
                 log("BONDED (confirmed write acknowledged) — custom channels should now flow")
@@ -575,7 +787,8 @@ class WhoopBleClient(
             // Run the connect handshake EXACTLY ONCE per connection. didWriteValueFor / onCharacteristicWrite
             // re-fires on EVERY with-response write (the bond write, etc.); the guard prevents re-blasting
             // the handshake at the strap mid-session — THE iOS "won't serve" root cause from the Swift notes.
-            if (!connectHandshakeDone) {
+            // WHOOP 5.0/MG uses CLIENT_HELLO, not this WHOOP4 command sequence, so it is skipped for it.
+            if (!connectHandshakeDone && connectedFamily == DeviceFamily.WHOOP4) {
                 connectHandshakeDone = true
                 runConnectHandshake()
             }
@@ -594,6 +807,9 @@ class WhoopBleClient(
                 log("Notify enable failed for ${descriptor.characteristic?.uuid}: status=$status")
             } else {
                 log("Subscribed ${descriptor.characteristic?.uuid}")
+                // A subscribe landed — replenish the shared BUSY-retry budget so a transient stall on
+                // one characteristic can't starve the others' retries (the counter is global).
+                cccdRetries = 0
             }
             // This CCCD write is done; enable the next characteristic's notifications.
             cccdInFlight = false
@@ -618,6 +834,27 @@ class WhoopBleClient(
             val value = characteristic.value ?: return
             onInbound(characteristic.uuid, value)
         }
+
+        // Result of an explicit readCharacteristic (refreshBattery's 0x2A19 read) — route it like a
+        // notification so the existing battery handler in onInbound runs. Android 13+ passes the value.
+        override fun onCharacteristicRead(
+            g: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray,
+            status: Int,
+        ) {
+            if (status == BluetoothGatt.GATT_SUCCESS) onInbound(characteristic.uuid, value)
+        }
+
+        @Deprecated("Deprecated in API 33; retained for API 26..32 where the value-bearing overload isn't called")
+        override fun onCharacteristicRead(
+            g: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int,
+        ) {
+            @Suppress("DEPRECATION")
+            if (status == BluetoothGatt.GATT_SUCCESS) characteristic.value?.let { onInbound(characteristic.uuid, it) }
+        }
     }
 
     // ====================================================================================
@@ -625,12 +862,16 @@ class WhoopBleClient(
     // ====================================================================================
 
     private fun onInbound(uuid: UUID, bytes: ByteArray) {
-        when (uuid) {
-            HEART_RATE_CHAR -> parseStandardHr(bytes)               // 0x2A37
-            BATTERY_CHAR -> bytes.firstOrNull()?.let {              // 0x2A19 = percent
+        lastDataAtMs = System.currentTimeMillis()   // feeds the keep-alive liveness watchdog
+        when {
+            uuid == HEART_RATE_CHAR -> parseStandardHr(bytes)       // 0x2A37
+            uuid == BATTERY_CHAR -> bytes.firstOrNull()?.let {      // 0x2A19 = percent
                 setBattery((it.toInt() and 0xFF).toDouble())
             }
-            CMD_NOTIFY_CHAR, EVENT_NOTIFY_CHAR, DATA_NOTIFY_CHAR -> {
+            // WHOOP4 custom notify chars, OR the WHOOP 5/MG puffin notify chars (fd4b0003/4/5/7) once
+            // bonded — both carry framed records (REALTIME_DATA etc.) through the family-aware reassembler.
+            uuid == CMD_NOTIFY_CHAR || uuid == EVENT_NOTIFY_CHAR || uuid == DATA_NOTIFY_CHAR ||
+                uuid in WHOOP5_NOTIFY_CHARS -> {
                 // Reassemble (no-op for already-complete frames) then route each complete frame.
                 // Port of: for frame in reassembler.feed(bytes) { router.handle(frame:) }.
                 for (frame in reassembler.feed(bytes)) {
@@ -667,7 +908,7 @@ class WhoopBleClient(
      * Direct port of `FrameRouter.handle(frame:)`.
      */
     private fun handleFrame(frame: ByteArray) {
-        val parsed = Framing.parseFrame(frame, DeviceFamily.WHOOP4)
+        val parsed = Framing.parseFrame(frame, connectedFamily)
         if (!parsed.ok) return
         // Reject frames that failed their checksum — never let bad bytes drive state.
         if (parsed.crcOk == false) return
@@ -760,7 +1001,20 @@ class WhoopBleClient(
         // R-R: the standard profile is the reliable source — surface whenever present.
         if (rr.isNotEmpty()) _state.value = _state.value.copy(rr = rr)
         // HR: accept only physiologically plausible values; reject 0/garbage (off-wrist).
-        if (hr in 30..220) _state.value = _state.value.copy(heartRate = hr)
+        if (hr in 30..220) {
+            _state.value = _state.value.copy(heartRate = hr)
+            // EXPERIMENTAL WHOOP 5.0/MG: there is no confirmed-write bond for a 5/MG strap, so once
+            // live HR actually streams over the standard profile we treat the link as established —
+            // otherwise the UI sits on "Connecting…" forever even though data is flowing (issue #8).
+            if (connectedFamily != DeviceFamily.WHOOP4 && !_state.value.bonded) {
+                _state.value = _state.value.copy(bonded = true)
+                log("WHOOP 5/MG: live HR streaming — marking the link established (experimental).")
+                // 5/MG has no WHOOP4 confirmed-write handshake, so the keep-alive (re-subscribe +
+                // 120s liveness bounce) is started here, on the bonded transition, instead of in
+                // runConnectHandshake. Handler.postDelayed is thread-safe to call from this callback.
+                startKeepAlive()
+            }
+        }
 
         // Record it continuously — independent of the realtime stream or which screen is open.
         // Port of BLEManager.parseStandardHR -> collector.ingestStandardHR(hr:rr:at:).
@@ -801,6 +1055,112 @@ class WhoopBleClient(
         backfillStarted = true
         handler.postDelayed({ requestSync() }, INITIAL_BACKFILL_DELAY_MS)
         startBackfillTimer()
+        startKeepAlive()
+        // Arm realtime HR now if a screen already wants it (Live/Health Monitor opened before the bond
+        // completed) — otherwise the stream would only start at the next keep-alive tick (issue #18).
+        if (wantsRealtime) send(CommandNumber.TOGGLE_REALTIME_HR, byteArrayOf(1))
+    }
+
+    // ====================================================================================
+    // MARK: Live-stream keep-alive  (port of BLEManager.startKeepAlive / keepAliveFire)
+    // ====================================================================================
+
+    /** (Re)start the 30s keep-alive. Called from the connect handshake; cancelled in [reset]. */
+    private fun startKeepAlive() {
+        handler.removeCallbacks(keepAliveRunnable)
+        keepAliveTick = 0
+        lastDataAtMs = System.currentTimeMillis()   // arm the watchdog from "now", not 1970
+        handler.postDelayed(keepAliveRunnable, KEEPALIVE_INTERVAL_MS)
+    }
+
+    private fun stopKeepAlive() {
+        handler.removeCallbacks(keepAliveRunnable)
+    }
+
+    /**
+     * Keep the live stream alive (port of `BLEManager.keepAliveFire`). The WHOOP firmware lets the
+     * realtime HR stream lapse if it isn't periodically re-armed, and a CCCD can silently drop — both
+     * leave HR frozen on a stale value while the GATT link still says "connected", which is exactly
+     * what people hit ("only a disconnect/reconnect un-sticks it"). Every 30s we:
+     *   1. bounce the link if NOTHING has arrived for >120s (the automatic disconnect+reconnect), or
+     *   2. re-subscribe if the stream just went quiet, re-arm realtime HR, and poll battery.
+     */
+    @SuppressLint("MissingPermission")
+    private fun keepAliveFire() {
+        val s = _state.value
+        if (!s.connected || !s.bonded) return   // disconnected: stop the cadence (restarts on reconnect)
+
+        val silentMs = System.currentTimeMillis() - lastDataAtMs
+        // Everything below is the LIVE-path keep-alive. During a historical offload the strap owns the
+        // link and has its own 60s idle watchdog (backfillTimeoutRunnable), so we stay completely out
+        // of the way — in particular we must NOT bounce, which would abandon the offload mid-session
+        // and break the safe-trim cursor.
+        if (!backfilling) {
+            if (silentMs > KEEPALIVE_STALL_MS) {
+                // Nothing for >120s — the live stream/link stalled. Bounce it: the auto-rescan on
+                // disconnect re-bonds and resumes streaming (the automatic version of the manual fix).
+                log("No data for ${silentMs / 1000}s — bouncing link to resume live stream")
+                intentionalDisconnect = false    // make sure the auto-reconnect fires
+                gatt?.disconnect()               // → handleDisconnect → reset() (cancels this) → reconnect
+            } else {
+                // Recover a silently-dropped subscription once the stream has gone quiet (any family).
+                if (silentMs > KEEPALIVE_QUIET_MS) enableLiveNotifications()
+                // WHOOP 4.0 only: re-arm realtime HR so the firmware can't let it lapse (while the Live
+                // screen wants it), and poll battery (~60s) — which also keeps the link warm. A 5/MG
+                // strap rejects WHOOP4-framed commands, so we skip them and rely on re-subscribe + bounce.
+                if (connectedFamily == DeviceFamily.WHOOP4) {
+                    if (wantsRealtime) send(CommandNumber.TOGGLE_REALTIME_HR, byteArrayOf(1))
+                    keepAliveTick += 1
+                    if (keepAliveTick % 2 == 0) send(CommandNumber.GET_BATTERY_LEVEL)
+                }
+            }
+        }
+
+        // Always re-arm the cadence. After a bounce the pending disconnect cancels this via reset(); a
+        // tick that fires while disconnected returns early above — so the keep-alive is never orphaned.
+        handler.postDelayed(keepAliveRunnable, KEEPALIVE_INTERVAL_MS)
+    }
+
+    /**
+     * Re-enable notifications on the live characteristics — recovers a CCCD subscription the stack
+     * silently dropped. [drainCccdQueue] writes them one at a time; draining to empty is a no-op for
+     * [startSession] (sessionStarted is already true), so this never re-fires the bond/hello.
+     */
+    @SuppressLint("MissingPermission")
+    private fun enableLiveNotifications() {
+        val g = gatt ?: return
+        when (connectedFamily) {
+            DeviceFamily.WHOOP4 -> g.getService(WHOOP4_SERVICE)?.let { svc ->
+                svc.getCharacteristic(CMD_NOTIFY_CHAR)?.let { cccdQueue.add(it) }
+                svc.getCharacteristic(EVENT_NOTIFY_CHAR)?.let { cccdQueue.add(it) }
+                svc.getCharacteristic(DATA_NOTIFY_CHAR)?.let { cccdQueue.add(it) }
+            }
+            DeviceFamily.WHOOP5 -> { /* 5/MG live HR rides the standard profile, re-subscribed below */ }
+        }
+        g.getService(HEART_RATE_SERVICE)?.getCharacteristic(HEART_RATE_CHAR)?.let { cccdQueue.add(it) }
+        g.getService(BATTERY_SERVICE)?.getCharacteristic(BATTERY_CHAR)?.let { cccdQueue.add(it) }
+        drainCccdQueue(g)
+    }
+
+    /**
+     * The Live screen wants realtime HR. Remember it ([wantsRealtime]) so the keep-alive keeps
+     * re-arming the stream so it can't lapse, and kick it now. Port of `BLEManager.startRealtime`.
+     */
+    fun startRealtime() {
+        wantsRealtime = true
+        // Both families arm via TOGGLE_REALTIME_HR; send() frames it correctly per family (puffin for
+        // 5/MG). The toggle only reaches a 5/MG strap once bonded — the post-bond branch arms it too.
+        if (connectedFamily == DeviceFamily.WHOOP4 || _state.value.bonded) {
+            send(CommandNumber.TOGGLE_REALTIME_HR, byteArrayOf(1))
+        }
+    }
+
+    /** The Live screen no longer needs realtime HR; stop re-arming it. Port of `BLEManager.stopRealtime`. */
+    fun stopRealtime() {
+        wantsRealtime = false
+        if (connectedFamily == DeviceFamily.WHOOP4 || _state.value.bonded) {
+            send(CommandNumber.TOGGLE_REALTIME_HR, byteArrayOf(0))
+        }
     }
 
     /**
@@ -829,6 +1189,12 @@ class WhoopBleClient(
 
     @SuppressLint("MissingPermission")
     private fun drainWriteQueue() {
+        // Serialise onto the GATT thread (main looper) — see connectGatt(..., handler). A command
+        // issued from a ViewModel coroutine (buzz/send) must not touch the stack off-thread.
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            handler.post { drainWriteQueue() }
+            return
+        }
         if (writeInFlight) return
         val g = gatt ?: return
         val ch = cmdCharacteristic ?: return
@@ -898,10 +1264,79 @@ class WhoopBleClient(
         }
     }
 
+    /**
+     * EXPERIMENTAL: WHOOP 5.0/MG opens a session with a static CLIENT_HELLO frame written to its
+     * fd4b0002 command characteristic, instead of the WHOOP4 confirmed-write bond. Written WITHOUT a
+     * response (it is a complete framed command), and we do NOT hold the in-flight slot or run the
+     * WHOOP4 handshake for it. Mirrors the order the WHOOP4 bond uses (write first, then drain the
+     * notify subscriptions). Unverified on real MG hardware.
+     */
+    @SuppressLint("MissingPermission")
+    private fun writeClientHello(g: BluetoothGatt, ch: BluetoothGattCharacteristic) {
+        val hello = DeviceFamily.WHOOP5.clientHello ?: return
+        // CONFIRMED (with-response) write — mirrors the macOS v1.5 fix and the hardware-verified finding
+        // that the CLIENT_HELLO confirmed write triggers the strap's just-works bond. A 5/MG strap won't
+        // stream HR (even over the standard 0x2A37 profile) on an UNauthenticated link, so the old
+        // unacknowledged write left it bond-less and silent — CLIENT_HELLO written, then nothing (#17).
+        // Hold the slot until the ACK; the opt-in puffin probe now fires post-bond (onCharacteristicWrite).
+        log("WHOOP 5/MG: writing CLIENT_HELLO to fd4b0002 with response (to trigger bonding, experimental).")
+        writeInFlight = true
+        val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            g.writeCharacteristic(ch, hello, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) ==
+                BluetoothGatt.GATT_SUCCESS
+        } else {
+            @Suppress("DEPRECATION")
+            run {
+                ch.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                ch.value = hello
+                g.writeCharacteristic(ch)
+            }
+        }
+        if (!ok) {
+            writeInFlight = false
+            log("CLIENT_HELLO write rejected by stack")
+        }
+    }
+
+    /**
+     * Open the session once every notification is subscribed. Android serializes GATT operations, so
+     * issuing the first command earlier raced the CCCD descriptor writes and dropped the subscriptions
+     * (issue #12). WHOOP 4.0 fires the just-works bond write (its ACK triggers the connect handshake in
+     * onCharacteristicWrite); WHOOP 5/MG sends CLIENT_HELLO (which itself fires the puffin probe when
+     * the experiment is enabled). Guarded so it runs exactly once per connection.
+     */
+    @SuppressLint("MissingPermission")
+    private fun startSession(g: BluetoothGatt) {
+        if (sessionStarted) return
+        sessionStarted = true
+        val cmd = cmdCharacteristic
+        if (cmd == null) {
+            log("Subscribed, but no command characteristic — cannot open a session")
+            return
+        }
+        when (connectedFamily) {
+            DeviceFamily.WHOOP4 -> writeBondFrame(g, cmd)
+            DeviceFamily.WHOOP5 -> writeClientHello(g, cmd)
+        }
+    }
+
     @SuppressLint("MissingPermission")
     private fun drainCccdQueue(g: BluetoothGatt) {
+        // All GATT mutations must run on the one thread the callbacks are pinned to (the main looper,
+        // via connectGatt(..., handler)). Re-post if we got here from any other thread.
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            handler.post { drainCccdQueue(g) }
+            return
+        }
         if (cccdInFlight) return
-        val ch = cccdQueue.poll() ?: return
+        val ch = cccdQueue.poll()
+        if (ch == null) {
+            // Every notification is enabled — now it's safe to write the first command, one GATT
+            // operation at a time. This is the fix for issue #12: the bond/hello no longer races the
+            // CCCD descriptor writes (which had silently dropped every subscription).
+            startSession(g)
+            return
+        }
         cccdInFlight = true
 
         // Tell the local stack to surface notifications, then write the CCCD so the remote starts
@@ -926,8 +1361,17 @@ class WhoopBleClient(
         }
         if (!ok) {
             cccdInFlight = false
-            log("writeDescriptor rejected for ${ch.uuid}")
-            drainCccdQueue(g)
+            if (cccdRetries < MAX_CCCD_RETRIES) {
+                // Transient BUSY (the stack slot hasn't freed): re-queue this subscribe and retry
+                // shortly. Order among the notify chars doesn't matter, so re-add at the tail.
+                cccdRetries++
+                log("writeDescriptor busy for ${ch.uuid}; retry $cccdRetries/$MAX_CCCD_RETRIES")
+                cccdQueue.add(ch)
+                handler.postDelayed({ drainCccdQueue(g) }, CCCD_RETRY_DELAY_MS)
+            } else {
+                log("writeDescriptor rejected for ${ch.uuid} (gave up after $MAX_CCCD_RETRIES retries)")
+                drainCccdQueue(g)
+            }
         }
     }
 
@@ -968,7 +1412,7 @@ class WhoopBleClient(
         // offset is a no-op. The dense, authoritative metric stream is the type-47 historical store
         // (which carries real unix ts); this live path captures live REALTIME_DATA/EVENT/battery.
         val now = (System.currentTimeMillis() / 1000L).toInt()
-        val parsed = frames.map { Framing.parseFrame(it, DeviceFamily.WHOOP4) }
+        val parsed = frames.map { Framing.parseFrame(it, connectedFamily) }
         val streams: Streams = extractStreams(parsed, deviceClockRef = now, wallClockRef = now)
         val batch = StreamPersistence.toBatch(streams)
         if (!batch.isEmpty) {
@@ -1143,7 +1587,7 @@ class WhoopBleClient(
         if (!intentionalDisconnect) {
             log("Disconnected (status=$status); rescanning in 3s")
             handler.postDelayed({
-                if (!intentionalDisconnect) connect()
+                if (!intentionalDisconnect) connect(selectedModel)
             }, RECONNECT_DELAY_MS)
         } else {
             log("Disconnected (intentional)")
@@ -1159,6 +1603,8 @@ class WhoopBleClient(
         cccdQueue.clear()
         writeInFlight = false
         cccdInFlight = false
+        cccdRetries = 0
+        sessionStarted = false
 
         // Reset offload state so the next connect starts a fresh session (port of the backfill
         // flag resets in didDisconnectPeripheral). Timers are handler-posted, so cancel them here.
@@ -1169,9 +1615,13 @@ class WhoopBleClient(
         strapNewestTs = null
         handler.removeCallbacks(backfillTimeoutRunnable)
         stopBackfillTimer()
-        // NOTE: the Reassembler is intentionally NOT reset here — the Swift BLEManager reuses a
-        // single `let reassembler` instance across reconnects too. Its SOF-resync loop (firstIndex
-        // of 0xAA) self-recovers from any partial-frame remnant on the next fragment.
+        stopKeepAlive()
+
+        // Fresh reassembler per connection. The macOS BLEManager reassigns a NEW Reassembler on each
+        // connect (BLEManager.swift:183); matching that here stops a partial/garbage frame left over
+        // from one session wedging the live stream after a reconnect (so the keep-alive's link-bounce
+        // actually recovers a frozen stream).
+        reassembler.reset()
     }
 
     /**
@@ -1200,6 +1650,17 @@ class WhoopBleClient(
     private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
     private fun log(s: String) {
-        Log.d(TAG, s)
+        // logcat is opt-in (Settings → Strap → "Debug logging"); default OFF so normal users don't
+        // emit the strap log to the system log. The in-app ring buffer below always records.
+        if (debugLogcat) Log.d(TAG, s)
+        // Mirror into the in-app ring buffer (format under the lock — SimpleDateFormat isn't
+        // thread-safe and log() is called from both the GATT binder thread and the main looper).
+        synchronized(logBuffer) {
+            logBuffer.addLast("${logTimeFmt.format(System.currentTimeMillis())}  $s")
+            while (logBuffer.size > LOG_BUFFER_MAX) logBuffer.removeFirst()
+        }
     }
+
+    /** Snapshot of the recent strap log, newest last, for the "Share strap log" diagnostics export. */
+    fun exportLogText(): String = synchronized(logBuffer) { logBuffer.joinToString("\n") }
 }

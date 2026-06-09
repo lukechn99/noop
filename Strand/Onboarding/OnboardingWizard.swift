@@ -36,7 +36,7 @@ public struct OnboardingWizard: View {
     // handles the bond→celebration transition without re-rendering the root.
 
     private enum Step: Int, CaseIterable {
-        case welcome, what, bluetooth, wear, scan, bonded, profile, importData, done
+        case welcome, what, expectations, bluetooth, wear, scan, bonded, profile, importData, done
 
         var isFirst: Bool { self == .welcome }
         var isLast: Bool { self == .done }
@@ -60,6 +60,7 @@ public struct OnboardingWizard: View {
                     switch step {
                     case .welcome:    WelcomeStep()
                     case .what:       WhatItDoesStep()
+                    case .expectations: ExpectationsStep()
                     case .bluetooth:  BluetoothStep()
                     case .wear:       WearStep()
                     case .scan:       ScanStep(advance: advance)
@@ -182,6 +183,7 @@ public struct OnboardingWizard: View {
         switch step {
         case .welcome:    return "Get Started"
         case .what:       return "Continue"
+        case .expectations: return "I understand"
         case .bluetooth:  return "Continue"
         case .wear:       return "I'm wearing it"
         case .scan:       return "Continue"
@@ -350,6 +352,44 @@ private struct WhatItDoesStep: View {
     }
 }
 
+// MARK: - Step 2.5 · What to expect (independent / experimental / 5-MG framing)
+
+private struct ExpectationsStep: View {
+    @State private var shown = false
+    var body: some View {
+        StepShell(title: "What to expect",
+                  subtitle: "A few honest words, so nothing's a surprise.") {
+            VStack(spacing: 12) {
+                ForEach(Array(AppChangelog.expectations.enumerated()), id: \.element.id) { index, e in
+                    HStack(alignment: .top, spacing: 14) {
+                        Image(systemName: e.icon)
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundStyle(StrandPalette.accent)
+                            .frame(width: 26)
+                            .padding(.top, 2)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(e.title).font(StrandFont.headline)
+                                .foregroundStyle(StrandPalette.textPrimary)
+                            Text(e.body).font(StrandFont.subhead)
+                                .foregroundStyle(StrandPalette.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(14)
+                    .frame(maxWidth: 520, alignment: .leading)
+                    .background(StrandPalette.surfaceRaised, in: RoundedRectangle(cornerRadius: 14))
+                    .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(StrandPalette.hairline))
+                    .opacity(shown ? 1 : 0)
+                    .offset(y: shown ? 0 : 8)
+                    .animation(StrandMotion.gentle.delay(Double(index) * 0.08), value: shown)
+                }
+            }
+        }
+        .onAppear { shown = true }
+    }
+}
+
 // MARK: - Step 3 · Bluetooth priming
 
 private struct BluetoothStep: View {
@@ -430,6 +470,10 @@ private struct ScanStep: View {
     @State private var scanning = false
     @State private var showHelp = false
 
+    /// Which strap to look for — shared with the Live screen via the same key.
+    @AppStorage("selectedWhoopModel") private var selectedModelRaw = WhoopModel.whoop4.rawValue
+    private var selectedModel: WhoopModel { WhoopModel(rawValue: selectedModelRaw) ?? .whoop4 }
+
     var body: some View {
         StepShell(title: "Find your strap",
                   subtitle: live.bonded ? "Bonded. You're set." : "We'll sweep the airwaves for it.") {
@@ -440,6 +484,20 @@ private struct ScanStep: View {
                 statusLine
 
                 if !live.bonded {
+                    VStack(spacing: 8) {
+                        Text("Which strap?").font(StrandFont.caption)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                        SegmentedPillControl(
+                            WhoopModel.allCases,
+                            selection: Binding(
+                                get: { selectedModel },
+                                set: { selectedModelRaw = $0.rawValue }
+                            ),
+                            label: { $0.displayName }
+                        )
+                    }
+                    .disabled(scanning)
+
                     Button(action: startScan) {
                         Label(scanning ? "Scanning…" : "Scan", systemImage: "dot.radiowaves.left.and.right")
                     }
@@ -472,7 +530,7 @@ private struct ScanStep: View {
     private func startScan() {
         scanning = true
         showHelp = false
-        model.scan()
+        model.scan(model: selectedModel)
         // Surface the reassurance card if we haven't bonded after a calm beat.
         DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
             if !live.bonded {

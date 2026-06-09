@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -24,7 +25,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.outlined.Person
@@ -33,6 +36,9 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -50,9 +56,12 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noop.BuildConfig
 import com.noop.analytics.Zones
+import com.noop.ble.PuffinExperiment
 import com.noop.data.DataBackup
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -155,6 +164,28 @@ fun SettingsScreen(vm: AppViewModel) {
     fun mutate(block: () -> Unit) { block(); rev++ }
 
     var backupBusy by remember { mutableStateOf(false) }
+
+    // Re-scan must request the runtime Bluetooth permission before scanning — without this the
+    // button calls connect() directly and silently no-ops on Android 12+ when the permission was
+    // denied/revoked (issue #1). Shared with Live's Connect via the one rememberRequestScan gate.
+    val requestScan = rememberRequestScan { vm.connect() }
+
+    // "What's New" changelog sheet, reachable any time from About (mirrors the macOS
+    // Settings → About "What's new" button). Persistence/gating lives in NoopRoot; this
+    // is a manual re-open and writes nothing.
+    var showWhatsNew by remember { mutableStateOf(false) }
+
+    // EXPERIMENTAL WHOOP 5/MG protocol probes (off by default). Mirrors the macOS @AppStorage toggle;
+    // SharedPreferences isn't reactive, so the Switch drives a local mutableState that the store reads.
+    val puffinExperiment = remember { PuffinExperiment.from(context) }
+    var puffinExperiments by remember { mutableStateOf(puffinExperiment.isEnabled) }
+
+    // "Keep connected in the background" — drives WhoopConnectionService (foreground service). Default
+    // on. SharedPreferences isn't reactive, so the Switch mirrors into a local state.
+    var backgroundConnection by remember { mutableStateOf(NoopPrefs.backgroundConnection(context)) }
+
+    // "Debug logging" — mirror the strap log to logcat (adb). Default OFF so normal users don't.
+    var debugLogging by remember { mutableStateOf(NoopPrefs.debugLogging(context)) }
 
     // SAF launchers — CreateDocument for export, OpenDocument for import.
     val exportLauncher = rememberLauncherForActivityResult(
@@ -310,18 +341,19 @@ fun SettingsScreen(vm: AppViewModel) {
                     }
                 }
                 Text(
-                    strapStatusDetail(live.bonded, live.connected),
+                    strapStatusDetail(live.bonded, live.connected, live.scanning),
                     style = NoopType.subhead,
                     color = Palette.textSecondary,
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Button(
-                        onClick = { vm.connect() },
+                        onClick = { requestScan() },
+                        enabled = !live.scanning,
                         colors = ButtonDefaults.buttonColors(
                             containerColor = Palette.accent,
                             contentColor = Palette.surfaceBase,
                         ),
-                    ) { Text("Re-scan", style = NoopType.captionNumber) }
+                    ) { Text(if (live.scanning) "Searching…" else "Re-scan", style = NoopType.captionNumber) }
 
                     OutlinedButton(
                         onClick = { vm.disconnect() },
@@ -329,6 +361,132 @@ fun SettingsScreen(vm: AppViewModel) {
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = Palette.statusCritical),
                     ) { Text("Disconnect", style = NoopType.captionNumber) }
                 }
+
+                // Keep streaming when the app is closed (Android foreground service). On Mac, NOOP
+                // already keeps your strap connected from the menu bar — just close the window.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "Keep connected in the background",
+                            style = NoopType.subhead,
+                            color = Palette.textPrimary,
+                        )
+                        Text(
+                            "Keeps streaming from your strap with an ongoing notification, even after you close NOOP. Turn off to disconnect when the app is closed.",
+                            style = NoopType.footnote,
+                            color = Palette.textTertiary,
+                        )
+                    }
+                    Switch(
+                        checked = backgroundConnection,
+                        onCheckedChange = {
+                            backgroundConnection = it
+                            vm.setBackgroundConnection(it)
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Palette.surfaceBase,
+                            checkedTrackColor = Palette.accent,
+                            uncheckedThumbColor = Palette.textSecondary,
+                            uncheckedTrackColor = Palette.surfaceInset,
+                            uncheckedBorderColor = Palette.hairline,
+                        ),
+                    )
+                }
+
+                // Diagnostics: "Debug logging" mirrors the strap log to logcat (adb). Default OFF — a
+                // normal user never needs to write the connection log to the system log; the in-app log
+                // (and the "Share strap log" export below) work regardless. Developers flip this on to
+                // watch the connection live over `adb logcat -s WhoopBleClient`.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "Debug logging",
+                            style = NoopType.subhead,
+                            color = Palette.textPrimary,
+                        )
+                        Text(
+                            "Also write the strap log to the system log (logcat) for development over adb. Off by default — the in-app log and “Share strap log” below work either way.",
+                            style = NoopType.footnote,
+                            color = Palette.textTertiary,
+                        )
+                    }
+                    Switch(
+                        checked = debugLogging,
+                        onCheckedChange = {
+                            debugLogging = it
+                            vm.setDebugLogging(it)
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Palette.surfaceBase,
+                            checkedTrackColor = Palette.accent,
+                            uncheckedThumbColor = Palette.textSecondary,
+                            uncheckedTrackColor = Palette.surfaceInset,
+                            uncheckedBorderColor = Palette.hairline,
+                        ),
+                        modifier = Modifier.semantics {
+                            contentDescription = "Debug logging"
+                        },
+                    )
+                }
+
+                // Diagnostics: export the strap connection log so people can attach it to a bug report.
+                OutlinedButton(
+                    onClick = { LogExport.shareStrapLog(context, vm.ble.exportLogText()) },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Palette.textSecondary),
+                ) { Text("Share strap log (for bug reports)", style = NoopType.captionNumber) }
+            }
+        }
+
+        // --- Experimental · WHOOP 5 / MG ---
+        SettingsSection(
+            icon = Icons.Filled.Science,
+            title = "Experimental · WHOOP 5 / MG",
+            blurb = "Live heart rate already works on a WHOOP 5/MG strap. These probes go further and try to coax more out of it. They are guesses, off by default, and only ever touch a 5/MG strap — WHOOP 4.0 is never affected.",
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    Text(
+                        "Try WHOOP 5/MG protocol probes",
+                        style = NoopType.subhead,
+                        color = Palette.textPrimary,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Switch(
+                        checked = puffinExperiments,
+                        onCheckedChange = {
+                            puffinExperiments = it
+                            puffinExperiment.isEnabled = it
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Palette.surfaceBase,
+                            checkedTrackColor = Palette.accent,
+                            uncheckedThumbColor = Palette.textSecondary,
+                            uncheckedTrackColor = Palette.surfaceInset,
+                            uncheckedBorderColor = Palette.hairline,
+                        ),
+                        modifier = Modifier.semantics {
+                            contentDescription = "Try WHOOP 5/MG protocol probes"
+                        },
+                    )
+                }
+                Text(
+                    "On a 5/MG connection NOOP will send a puffin realtime-stream request after the handshake, and log what comes back. If you have a 5/MG strap, turning this on and sharing your strap log helps map the protocol. No effect on WHOOP 4.0.",
+                    style = NoopType.caption,
+                    color = Palette.textTertiary,
+                )
             }
         }
 
@@ -401,6 +559,40 @@ fun SettingsScreen(vm: AppViewModel) {
                     style = NoopType.subhead,
                     color = Palette.textSecondary,
                 )
+
+                // What's new — re-open the changelog sheet any time (macOS About parity).
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Palette.surfaceInset)
+                        .border(1.dp, Palette.hairline, RoundedCornerShape(10.dp))
+                        .clickable { showWhatsNew = true }
+                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                        .semantics { contentDescription = "What's new in NOOP ${AppChangelog.CURRENT_VERSION}" },
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Icon(
+                            Icons.Filled.Campaign,
+                            contentDescription = null,
+                            tint = Palette.accent,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("What's new", style = NoopType.headline, color = Palette.textPrimary)
+                            Text(
+                                "Recent changes and what to expect",
+                                style = NoopType.footnote,
+                                color = Palette.textSecondary,
+                            )
+                        }
+                        Text("›", style = NoopType.title2, color = Palette.accent)
+                    }
+                }
 
                 // Medical disclaimer — inset well with a warning-tinted hairline.
                 Row(
@@ -480,6 +672,19 @@ fun SettingsScreen(vm: AppViewModel) {
                 }
             }
         }
+
+        // What's new sheet, opened from the About row above. Full-screen Dialog so it
+        // covers the whole screen like the macOS .sheet; closing just hides it.
+        if (showWhatsNew) {
+            Dialog(
+                onDismissRequest = { showWhatsNew = false },
+                properties = DialogProperties(usePlatformDefaultWidth = false),
+            ) {
+                Surface(modifier = Modifier.fillMaxSize(), color = Palette.surfaceBase) {
+                    WhatsNewSheet(onClose = { showWhatsNew = false })
+                }
+            }
+        }
     }
 }
 
@@ -500,7 +705,9 @@ private fun strapTone(bonded: Boolean, connected: Boolean): StrandTone = when {
     else -> StrandTone.Critical
 }
 
-private fun strapStatusDetail(bonded: Boolean, connected: Boolean): String = when {
+// `internal` (not private) so the unit test in the same package can assert the scanning branch.
+internal fun strapStatusDetail(bonded: Boolean, connected: Boolean, scanning: Boolean): String = when {
+    scanning -> "Searching for your WHOOP… make sure it's charged, on your wrist, and the official WHOOP app isn't connected to it."
     bonded && connected -> "Your strap is paired and sending data. Open Live for a real-time heart rate."
     connected -> "Connected. Finishing the secure pairing handshake…"
     bonded -> "Previously paired but not currently connected. Re-scan to reconnect."

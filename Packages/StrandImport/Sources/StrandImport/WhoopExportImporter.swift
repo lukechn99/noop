@@ -20,6 +20,39 @@ public struct WhoopExportImporter {
     private static let workoutsName = "workouts.csv"
     private static let journalName = "journal_entries.csv"
 
+    /// Map a known localized WHOOP export filename to its canonical English name. WHOOP localizes
+    /// the CSV filenames in non-English exports (issue #3): a German export ships Schlaf.csv,
+    /// Trainings.csv, physiologische_zyklen.csv, and logbuch_eintraege.csv.
+    private static func localizedAlias(_ base: String) -> String? {
+        switch base {
+        case "physiologische_zyklen.csv": return cyclesName   // German (app.whoop.com → Daten exportieren)
+        case "schlaf.csv":                return sleepsName
+        case "trainings.csv":             return workoutsName
+        case "logbuch_eintraege.csv":     return journalName
+        default:                          return nil
+        }
+    }
+
+    /// Classify a CSV by its header columns when the filename is unrecognised. Covers any language
+    /// whose column headers stay English even when the filenames are translated.
+    private static func sniffKind(_ data: Data) -> String? {
+        let h = Set(CSVTable(data: data).normalizedHeaders)
+        if h.contains("activity_name") || h.contains("workout_start_time") { return workoutsName }
+        if h.contains("question_text") || h.contains("answered_yes_no") || h.contains("question") { return journalName }
+        if h.contains("nap") && (h.contains("sleep_onset") || h.contains("wake_onset")) { return sleepsName }
+        if h.contains("cycle_start_time") || h.contains("recovery_score_pct") || h.contains("day_strain") { return cyclesName }
+        if h.contains("sleep_onset") || h.contains("asleep_duration_min") { return sleepsName }
+        return nil
+    }
+
+    /// Canonical key for a candidate CSV: exact English name, then a localized alias, then content.
+    private static func canonicalKey(base: String, data: Data) -> String? {
+        let wanted: Set<String> = [cyclesName, sleepsName, workoutsName, journalName]
+        if wanted.contains(base) { return base }
+        if let a = localizedAlias(base) { return a }
+        return sniffKind(data)
+    }
+
     // MARK: - Public entry point
 
     /// Import from a folder or a `.zip` URL, returning all normalized rows plus
@@ -77,7 +110,6 @@ public struct WhoopExportImporter {
     private func loadFromFolder(_ folder: URL) throws -> [String: Data] {
         let fm = FileManager.default
         var result: [String: Data] = [:]
-        let wanted: Set<String> = [Self.cyclesName, Self.sleepsName, Self.workoutsName, Self.journalName]
 
         guard let enumerator = fm.enumerator(
             at: folder,
@@ -88,12 +120,14 @@ public struct WhoopExportImporter {
         }
 
         for case let fileURL as URL in enumerator {
-            let name = fileURL.lastPathComponent.lowercased()
-            guard wanted.contains(name), result[name] == nil else { continue }
+            let base = fileURL.lastPathComponent.lowercased()
+            guard base.hasSuffix(".csv") else { continue }   // skip GPX/ECG/etc.
             let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
             if size > Self.maxEntryBytes { continue }   // refuse an implausibly large CSV
-            if let data = try? Data(contentsOf: fileURL) {
-                result[name] = data
+            guard let data = try? Data(contentsOf: fileURL) else { continue }
+            // Route by English name, localized filename alias, then header content (issue #3).
+            if let key = Self.canonicalKey(base: base, data: data), result[key] == nil {
+                result[key] = data
             }
         }
         return result
@@ -112,12 +146,11 @@ public struct WhoopExportImporter {
         }
 
         var result: [String: Data] = [:]
-        let wanted: Set<String> = [Self.cyclesName, Self.sleepsName, Self.workoutsName, Self.journalName]
 
         for entry in archive {
             guard entry.type == .file else { continue }
-            let name = (entry.path as NSString).lastPathComponent.lowercased()
-            guard wanted.contains(name), result[name] == nil else { continue }
+            let base = (entry.path as NSString).lastPathComponent.lowercased()
+            guard base.hasSuffix(".csv") else { continue }   // skip GPX/ECG/etc.
             // Reject entries whose declared uncompressed size is implausible (zip-bomb guard)...
             let declared = Int(exactly: entry.uncompressedSize) ?? Int.max
             if declared > Self.maxEntryBytes { continue }
@@ -131,10 +164,14 @@ public struct WhoopExportImporter {
                     if written > Self.maxEntryBytes { throw CancellationError() }
                     buffer.append(chunk)
                 }
-                if !buffer.isEmpty { result[name] = buffer }
             } catch {
                 // Corrupt / truncated / oversized entry: skip rather than import partial data.
                 continue
+            }
+            guard !buffer.isEmpty else { continue }
+            // Route by English name, localized filename alias, then header content (issue #3).
+            if let key = Self.canonicalKey(base: base, data: buffer), result[key] == nil {
+                result[key] = buffer
             }
         }
         return result

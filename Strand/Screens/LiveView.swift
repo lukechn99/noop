@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import StrandDesign
 import WhoopProtocol
 
@@ -9,25 +10,38 @@ struct LiveView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var live: LiveState
 
+    /// Which strap the user is pairing — persists across launches. Drives which
+    /// BLE service we scan for so a WHOOP 4.0 scan never hangs on a WHOOP 5 wrist.
+    @AppStorage("selectedWhoopModel") private var selectedModelRaw = WhoopModel.whoop4.rawValue
+    private var selectedModel: WhoopModel { WhoopModel(rawValue: selectedModelRaw) ?? .whoop4 }
+
     /// Smoothed, spike-filtered live HR from AppModel (median over a short window).
     private var displayHR: Int? { model.bpm }
+    private var activeConnection: Bool { live.connected && live.bonded }
 
     var body: some View {
         ScreenScaffold(title: "Live",
                        subtitle: "Your strap in real time — heart rate and frames as they arrive.") {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 connectionRow
+                // Bond-refused guidance, shown right here on Live where people actually connect (it
+                // also appears in Settings). A 5/MG strap still bonded to the WHOOP app refuses pairing
+                // with "Encryption is insufficient" — this tells the user to free it and re-pair.
+                if let hint = live.pairingHint { pairingHintBanner(hint) }
                 heartRateCard
                 statusGrid
+                // Show the strap picker whenever we're not actively streaming, so a user with both a
+                // WHOOP 4 and a 5/MG can switch between them. (It used to hide once `bonded`, which is
+                // sticky across disconnects — so after the first pairing the picker vanished for good.)
+                if !activeConnection { modelPicker }
                 controls
                 logCard
             }
         }
-        .onAppear { if live.bonded { model.startRealtimeHR(); model.getBattery() } }
+        .onAppear { refreshLiveSession() }
         .onDisappear { model.stopRealtimeHR() }
-        .onChange(of: live.bonded) { bonded in
-            if bonded { model.startRealtimeHR(); model.getBattery() }
-        }
+        .onChange(of: live.bonded) { _ in refreshLiveSession() }
+        .onChange(of: live.connected) { _ in refreshLiveSession() }
     }
 
     // MARK: - Connection
@@ -41,8 +55,9 @@ struct LiveView: View {
 
     private var connectionPill: some View {
         let (label, color): (String, Color) =
-            live.bonded ? ("Bonded", StrandPalette.accent)
+            activeConnection ? ("Streaming", StrandPalette.accent)
             : live.connected ? ("Connected", StrandPalette.statusWarning)
+            : live.bonded ? ("Paired · idle", StrandPalette.statusWarning)
             : ("Disconnected", StrandPalette.metricRose)
         return HStack(spacing: 8) {
             Circle().fill(color).frame(width: 9, height: 9)
@@ -97,11 +112,58 @@ struct LiveView: View {
         }
     }
 
+    private func pairingHintBanner(_ hint: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(StrandPalette.statusWarning)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Pairing refused — free the strap from the WHOOP app")
+                    .font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
+                Text(hint)
+                    .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(StrandPalette.surfaceRaised, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(StrandPalette.statusWarning.opacity(0.5), lineWidth: 1))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Pairing help: \(hint)")
+    }
+
+    // MARK: - Strap picker
+
+    /// Pick the strap family to scan for. Switching the selection drops the current strap's bond so the
+    /// newly-picked one connects fresh — letting a user move between a WHOOP 4 and a 5/MG.
+    private var modelPicker: some View {
+        HStack(spacing: 10) {
+            Text("Strap").font(StrandFont.caption).foregroundStyle(StrandPalette.textSecondary)
+            SegmentedPillControl(
+                WhoopModel.allCases,
+                selection: Binding(
+                    get: { selectedModel },
+                    set: { newModel in
+                        guard newModel.rawValue != selectedModelRaw else { return }
+                        selectedModelRaw = newModel.rawValue
+                        // Clear the previous strap's sticky bond/connection so the next scan targets the
+                        // new family's service and bonds it fresh.
+                        model.prepareStrapSwitch()
+                    }
+                ),
+                label: { $0.displayName }
+            )
+            Spacer()
+        }
+    }
+
     // MARK: - Controls
 
     private var controls: some View {
         HStack(spacing: 12) {
-            Button { model.scan() } label: {
+            Button { model.scan(model: selectedModel) } label: {
                 Label(live.connected ? "Re-scan" : "Scan & Connect",
                       systemImage: "antenna.radiowaves.left.and.right")
                     .frame(maxWidth: .infinity).padding(.vertical, 8)
@@ -113,8 +175,8 @@ struct LiveView: View {
                     .frame(maxWidth: .infinity).padding(.vertical, 8)
             }
             .buttonStyle(.bordered).tint(StrandPalette.accent)
-            .disabled(!live.bonded)
-            .help("Fire a test haptic buzz on the strap (requires a bonded connection)")
+            .disabled(!activeConnection)
+            .help("Fire a test haptic buzz on the strap (requires an active strap connection)")
 
             Button(role: .destructive) { model.disconnect() } label: {
                 Label("Disconnect", systemImage: "xmark.circle")
@@ -125,13 +187,28 @@ struct LiveView: View {
         }
     }
 
+    private func refreshLiveSession() {
+        guard activeConnection else { return }
+        model.startRealtimeHR()
+        model.getBattery()
+    }
+
     // MARK: - Strap log
 
     private var logCard: some View {
         NoopCard {
             VStack(alignment: .leading, spacing: 8) {
-                Text("STRAP LOG").font(StrandFont.overline).tracking(StrandFont.overlineTracking)
-                    .foregroundStyle(StrandPalette.textSecondary)
+                HStack(spacing: 12) {
+                    Text("STRAP LOG").font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                    Spacer()
+                    // Export the log so people can attach it to a bug report (issue #17 — macOS users
+                    // had no way to share it). Copy → clipboard; Save… → a .txt file.
+                    Button("Copy") { copyStrapLog() }
+                        .buttonStyle(.plain).font(StrandFont.mono).foregroundStyle(StrandPalette.accent)
+                    Button("Save…") { saveStrapLog() }
+                        .buttonStyle(.plain).font(StrandFont.mono).foregroundStyle(StrandPalette.accent)
+                }
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(alignment: .leading, spacing: 2) {
@@ -150,5 +227,28 @@ struct LiveView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Strap-log export (issue #17 — let macOS users share the log for bug reports)
+
+    private func strapLogText() -> String {
+        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let header = "NOOP strap log — macOS\nApp: \(v)\nmacOS: "
+            + ProcessInfo.processInfo.operatingSystemVersionString + "\n"
+            + String(repeating: "-", count: 40) + "\n"
+        return header + live.log.joined(separator: "\n")
+    }
+
+    private func copyStrapLog() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(strapLogText(), forType: .string)
+    }
+
+    private func saveStrapLog() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "noop-strap-log.txt"
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        try? strapLogText().write(to: url, atomically: true, encoding: .utf8)
     }
 }

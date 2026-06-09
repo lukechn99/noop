@@ -203,4 +203,34 @@ final class WhoopExportImporterTests: XCTestCase {
         XCTAssertEqual(table.rows[0]["b"], "she said \"hi\"")
         XCTAssertEqual(table.rows[0]["c"], "plain")
     }
+
+    // MARK: - Localized (German) column headers — issue #3
+
+    func testGermanHeaderNormalizationAliases() {
+        // Diacritic-folded German headers map onto the canonical English keys.
+        XCTAssertEqual(HeaderNorm.normalize("Erholungswert %"), "recovery_score_pct")
+        XCTAssertEqual(HeaderNorm.normalize("Ruheherzfrequenz (Schläge pro Minute)"), "resting_heart_rate_bpm")
+        XCTAssertEqual(HeaderNorm.normalize("Herzfrequenzvariabilität (ms)"), "heart_rate_variability_ms")
+        XCTAssertEqual(HeaderNorm.normalize("Schlafbeständigkeit %"), "sleep_consistency_pct")
+        XCTAssertEqual(HeaderNorm.normalize("Name der Aktivität"), "activity_name")
+        XCTAssertEqual(HeaderNorm.normalize("HF-Zone 3 %"), "hr_zone_3_pct")
+        // English headers are unaffected by the folding + alias.
+        XCTAssertEqual(HeaderNorm.normalize("Recovery score %"), "recovery_score_pct")
+        XCTAssertEqual(HeaderNorm.normalize("Cycle start time"), "cycle_start_time")
+    }
+
+    func testGermanCyclesValuesParse() throws {
+        // A real German physiologische_zyklen.csv header row + one data row: values must come through.
+        let csv = """
+        Startzeit des Zyklus,Endzeit des Zyklus,Zeitzone des Zyklus,Erholungswert %,Ruheherzfrequenz (Schläge pro Minute),Herzfrequenzvariabilität (ms),Tagesbelastung,Durchschnittliche HF (Schläge pro Minute)
+        2024-03-01 06:00:00,2024-03-02 06:00:00,UTC+00:00,80,52,95,12.5,61
+        """
+        let rows = WhoopExportImporter().parseCycles(CSVTable(text: csv))
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].recoveryScore, 80)
+        XCTAssertEqual(rows[0].restingHeartRate, 52)
+        XCTAssertEqual(rows[0].hrvMs, 95)
+        XCTAssertEqual(rows[0].dayStrain, 12.5)
+        XCTAssertEqual(rows[0].cycleStart, Fixtures.utc(2024, 3, 1, 6, 0, 0))
+    }
 }

@@ -1,4 +1,6 @@
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 import StrandDesign
 import WhoopStore
 
@@ -15,11 +17,21 @@ struct SettingsView: View {
     @State private var backupAlertMessage = ""
     @State private var showBackupAlert = false
 
+    /// Opt-in WHOOP 5/MG protocol experiments (off by default). See [PuffinExperiment].
+    @AppStorage(PuffinExperiment.defaultsKey) private var puffinExperiments = false
+
+    /// Opt-in WHOOP 5/MG raw-frame capture to a file (off by default). See [PuffinFrameRecorder].
+    @AppStorage(PuffinFrameRecorder.enabledKey) private var puffinCapture = false
+
+    /// "What's New" changelog sheet, reachable any time from About.
+    @State private var showWhatsNew = false
+
     var body: some View {
         ScreenScaffold(title: "Settings",
                        subtitle: "Your numbers, your strap, and how NOOP works. All on this Mac.") {
             profileCard
             strapCard
+            experimentalCard
             backupCard
             aboutCard
         }
@@ -27,6 +39,9 @@ struct SettingsView: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text(backupAlertMessage)
+        }
+        .sheet(isPresented: $showWhatsNew) {
+            WhatsNewView(onClose: { showWhatsNew = false })
         }
     }
 
@@ -142,7 +157,7 @@ struct SettingsView: View {
         ) {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 12) {
-                    StatePill(strapStatusTitle, tone: strapTone, pulsing: live.connected)
+                    StatePill("\(strapStatusTitle)", tone: strapTone, pulsing: live.connected)
                     if let pct = live.batteryPct {
                         StatePill("Battery \(Int(pct.rounded()))%",
                                   tone: batteryTone(pct), showsDot: false)
@@ -193,6 +208,7 @@ struct SettingsView: View {
         if live.bonded && live.connected {
             return "Your strap is paired and sending data. Open Live for a real-time heart rate."
         }
+        if live.connected, let hint = live.pairingHint { return hint }
         if live.connected { return "Connected. Finishing the secure pairing handshake…" }
         if live.bonded { return "Previously paired but not currently connected. Re-scan to reconnect." }
         return "No strap connected. Put your WHOOP nearby and tap Re-scan to pair."
@@ -205,6 +221,97 @@ struct SettingsView: View {
     }
 
     // MARK: - Backup & restore
+
+    // MARK: - Experimental (WHOOP 5 / MG)
+
+    private var experimentalCard: some View {
+        SettingsSection(
+            icon: "flask.fill",
+            title: "Experimental · WHOOP 5 / MG",
+            blurb: "Live heart rate already works on a WHOOP 5/MG strap. These probes go further and try to coax more out of it. They are guesses, off by default, and only ever touch a 5/MG strap — WHOOP 4.0 is never affected."
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle(isOn: $puffinExperiments) {
+                    Text("Try WHOOP 5/MG protocol probes")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                }
+                .toggleStyle(.switch)
+                .tint(StrandPalette.accent)
+                Text("On a 5/MG connection NOOP will send a puffin realtime-stream request after the handshake, and log what comes back. If you have a 5/MG strap, turning this on and sharing your strap log helps map the protocol. No effect on WHOOP 4.0.")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider().overlay(StrandPalette.hairline)
+
+                Toggle(isOn: $puffinCapture) {
+                    Text("Record puffin frames to a file")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                }
+                .toggleStyle(.switch)
+                .tint(StrandPalette.accent)
+                Text("Saves every raw 5/MG frame (with a timestamp and the live heart rate) to a JSON file you can share to help map the biometric layout. This only records frames the strap already sent — it never writes to your strap — so it is safe to leave on. Export the file and attach it to a protocol-mapping issue.")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if live.puffinCaptureCount > 0 {
+                    Text("\(live.puffinCaptureCount) frame\(live.puffinCaptureCount == 1 ? "" : "s") captured this session.")
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                    HStack(spacing: 12) {
+                        Button {
+                            exportPuffinCaptures()
+                        } label: {
+                            Label("Export frames…", systemImage: "square.and.arrow.up")
+                                .padding(.horizontal, 6)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(StrandPalette.accent)
+
+                        Button {
+                            revealPuffinCaptures()
+                        } label: {
+                            Label("Reveal in Finder", systemImage: "folder")
+                                .padding(.horizontal, 6)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(StrandPalette.accent)
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Flush the in-flight capture, then copy it to a user-chosen location via a save panel.
+    private func exportPuffinCaptures() {
+        model.ble.flushPuffinCaptures()
+        guard let src = live.puffinCaptureURL else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = src.lastPathComponent
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let dest = panel.url else { return }
+        let fm = FileManager.default
+        do {
+            if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
+            try fm.copyItem(at: src, to: dest)
+        } catch {
+            backupAlertTitle = "Export failed"
+            backupAlertMessage = error.localizedDescription
+            showBackupAlert = true
+        }
+    }
+
+    /// Flush, then reveal the capture file in Finder so the user can grab it directly.
+    private func revealPuffinCaptures() {
+        model.ble.flushPuffinCaptures()
+        guard let url = live.puffinCaptureURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
 
     private var backupCard: some View {
         SettingsSection(
@@ -302,10 +409,18 @@ struct SettingsView: View {
                     Text("NOOP")
                         .font(StrandFont.title2)
                         .foregroundStyle(StrandPalette.textPrimary)
-                    StatePill("v0.1.0", tone: .neutral, showsDot: false)
+                    StatePill("v\(AppChangelog.currentVersion)", tone: .neutral, showsDot: false)
+                    Spacer()
+                    Button {
+                        showWhatsNew = true
+                    } label: {
+                        Label("What's new", systemImage: "sparkles").padding(.horizontal, 4)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(StrandPalette.accent)
                 }
 
-                Text("A standalone macOS companion for your WHOOP. Everything stays on this Mac — your history, your live stream, your numbers. Nothing is uploaded.")
+                Text("A standalone companion for your WHOOP. Everything stays on this device — your history, your live stream, your numbers. Nothing is uploaded. NOOP is an independent, experimental project, not the WHOOP app.")
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -376,8 +491,8 @@ struct SettingsView: View {
 /// A grouped settings card: icon + title header, an explanatory blurb, then content.
 private struct SettingsSection<Content: View>: View {
     let icon: String
-    let title: String
-    let blurb: String
+    let title: LocalizedStringKey
+    let blurb: LocalizedStringKey
     @ViewBuilder var content: () -> Content
 
     var body: some View {
@@ -405,7 +520,7 @@ private struct SettingsSection<Content: View>: View {
 
 /// Label on the left, control on the right — the two-column form feel.
 private struct FormRow<Control: View>: View {
-    let label: String
+    let label: LocalizedStringKey
     @ViewBuilder var control: () -> Control
 
     var body: some View {

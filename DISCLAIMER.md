@@ -11,6 +11,10 @@ sponsorship, or endorsement, and never as the name of this project's own product
 "WHOOP" and any related marks are the property of WHOOP, Inc. All other trademarks belong to
 their respective owners.
 
+**Use it only with a device you own, and do not use this project in breach of any agreement that
+applies to you.** This software does not encourage or require you to violate any terms you have
+agreed to; how you use hardware you own is your responsibility.
+
 ## 2. No proprietary material is contained or redistributed
 
 This repository contains **only original work** authored by the project's contributors, plus
@@ -49,13 +53,18 @@ for educational and security-research purposes.
 - Nothing here is intended to compete with, devalue, or harm WHOOP's products, services, or
   business. Users are encouraged to maintain an active relationship with the official product.
 
-## 4. Personal & educational use only — no warranty
+## 4. Licensing, non-commercial use, and no warranty
 
-This software is provided **for personal and educational use only**, **as-is**, with **no
-warranty of any kind**, express or implied. You use it entirely **at your own risk**, including
-any risk to your device, data, or warranty status. The authors accept no liability for any
-damage, loss, or consequence arising from its use. Review your own agreements and local laws
-before use; you are responsible for your own compliance.
+NOOP's own source code and documentation are made available under the **PolyForm Noncommercial
+License 1.0.0** (see [`LICENSE`](LICENSE)): free for personal and other **non-commercial** use —
+you may read, run, fork, and contribute, but commercial use is not granted. The license covers
+NOOP's original work only; protocol facts are uncopyrightable, and bundled dependencies keep their
+own licenses (see [`NOTICE`](NOTICE)).
+
+The software is provided **as-is**, with **no warranty of any kind**, express or implied. You use it
+entirely **at your own risk**, including any risk to your device, data, or warranty status. The
+authors accept no liability for any damage, loss, or consequence arising from its use. Review your
+own agreements and local laws before use; you are responsible for your own compliance.
 
 ## 5. Not a medical device
 
