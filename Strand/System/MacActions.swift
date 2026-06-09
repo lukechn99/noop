@@ -1,5 +1,4 @@
 import Foundation
-import AppKit
 
 /// What a strap double-tap (or a wrist-off trigger) does on the Mac.
 enum MacActionKind: String, Codable, CaseIterable, Identifiable {
@@ -30,6 +29,9 @@ enum MacActionKind: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+#if os(macOS)
+import AppKit
+
 /// Mac-side side effects. Sandbox-friendly: Shortcuts run via the URL scheme (Shortcuts.app does the
 /// privileged work), and screen lock uses login.framework's lock entry point.
 enum MacActions {
@@ -58,3 +60,4 @@ enum MacActions {
         NSWorkspace.shared.open(url)
     }
 }
+#endif

@@ -14,12 +14,17 @@ struct StrandApp: App {
                 .environmentObject(model.behavior)
                 .environmentObject(model.intelligence)
                 .environmentObject(model.coach)
+                #if os(macOS)
                 .frame(minWidth: 1000, minHeight: 700)
+                #endif
                 .preferredColorScheme(.dark)
         }
+        #if os(macOS)
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1180, height: 820)
+        #endif
 
+        #if os(macOS)
         // Menu-bar extra: glanceable live HR + a compact popover.
         MenuBarExtra {
             MenuBarContent()
@@ -32,5 +37,6 @@ struct StrandApp: App {
                 .environmentObject(model.live)
         }
         .menuBarExtraStyle(.window)
+        #endif
     }
 }

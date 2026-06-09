@@ -1,7 +1,9 @@
 import Foundation
-import AppKit
 import UniformTypeIdentifiers
 import WhoopStore
+#if os(macOS)
+import AppKit
+#endif
 
 /// Full-database EXPORT / IMPORT for device migration.
 ///
@@ -41,6 +43,9 @@ enum DataBackup {
     ///   sidecar — so the backup is still complete, just not consolidated.
     @MainActor
     static func runExport(checkpoint: @escaping () async -> Bool) async -> BackupResult {
+        #if !os(macOS)
+        return .failure("Database export is not yet supported on this platform.")
+        #else
         let dbPath: String
         do { dbPath = try StorePaths.defaultDatabasePath() }
         catch { return .failure("Couldn't locate the NOOP database. \(error.localizedDescription)") }
@@ -85,6 +90,7 @@ enum DataBackup {
         } catch {
             return .failure("Export failed: \(error.localizedDescription)")
         }
+        #endif
     }
 
     // MARK: - Import
@@ -94,6 +100,9 @@ enum DataBackup {
     /// open, so the swapped-in file only takes effect after a relaunch — the caller informs the user.
     @MainActor
     static func runImport() async -> BackupResult {
+        #if !os(macOS)
+        return .failure("Database import is not yet supported on this platform.")
+        #else
         let dbPath: String
         do { dbPath = try StorePaths.defaultDatabasePath() }
         catch { return .failure("Couldn't locate the NOOP database. \(error.localizedDescription)") }
@@ -141,6 +150,7 @@ enum DataBackup {
         } catch {
             return .failure("Import failed: \(error.localizedDescription)")
         }
+        #endif
     }
 
     // MARK: - Helpers

@@ -184,10 +184,16 @@ final class AppModel: ObservableObject {
     func runMacAction(_ kind: MacActionKind, shortcut: String) {
         switch kind {
         case .none: break
-        case .lockScreen: if !MacActions.lockScreen() { MacActions.runShortcut("Lock Screen") }
+        case .lockScreen:
+            #if os(macOS)
+            if !MacActions.lockScreen() { MacActions.runShortcut("Lock Screen") }
+            #endif
         case .buzzBack: buzz(loops: 1)
         case .markMoment: markMoment()
-        case .runShortcut: MacActions.runShortcut(shortcut)
+        case .runShortcut:
+            #if os(macOS)
+            MacActions.runShortcut(shortcut)
+            #endif
         }
     }
 
@@ -201,12 +207,14 @@ final class AppModel: ObservableObject {
     }
 
     private func handleWristChange(_ worn: Bool) {
+        #if os(macOS)
         if worn {
             if !behavior.wristOnShortcut.isEmpty { MacActions.runShortcut(behavior.wristOnShortcut) }
         } else {
             if behavior.autoLockOnWristOff, !MacActions.lockScreen() { MacActions.runShortcut("Lock Screen") }
             if !behavior.wristOffShortcut.isEmpty { MacActions.runShortcut(behavior.wristOffShortcut) }
         }
+        #endif
     }
 
     /// HR-zone haptic coaching: buzz when crossing into the top zone (ease off) or back to recovery.

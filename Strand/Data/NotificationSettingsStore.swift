@@ -1,7 +1,9 @@
 import Foundation
 import Combine
 import SwiftUI
+#if os(macOS)
 import AppKit
+#endif
 
 // MARK: - Buzz pattern
 
@@ -64,7 +66,7 @@ struct NotifApp: Identifiable {
     let id: String          // resolved bundle id — also the persistence key
     let name: String
     let category: NotifCategory
-    let icon: NSImage?
+    let icon: CGImage?
     let fallbackSymbol: String
 }
 
@@ -160,6 +162,7 @@ final class NotificationSettingsStore: ObservableObject {
     /// Catalog of notification-capable apps (name, category, candidate bundle ids, fallback glyph).
     /// Only those actually installed are returned, each with its real macOS app icon.
     private static func discoverApps() -> [NotifApp] {
+        #if os(macOS)
         let catalog: [(name: String, category: NotifCategory, ids: [String], glyph: String)] = [
             ("Microsoft Outlook", .email,     ["com.microsoft.Outlook"],                              "envelope.fill"),
             ("Mail",              .email,     ["com.apple.mail"],                                     "envelope.fill"),
@@ -187,11 +190,19 @@ final class NotificationSettingsStore: ObservableObject {
                 }
             }
             guard let r = resolved else { continue }
-            let icon = ws.icon(forFile: r.url.path)
-            icon.size = NSSize(width: 64, height: 64)
+            let nsIcon = ws.icon(forFile: r.url.path)
+            nsIcon.size = NSSize(width: 64, height: 64)
+            var cgIcon: CGImage?
+            if let tiff = nsIcon.tiffRepresentation,
+               let rep = NSBitmapImageRep(data: tiff) {
+                cgIcon = rep.cgImage
+            }
             out.append(NotifApp(id: r.id, name: entry.name, category: entry.category,
-                                icon: icon, fallbackSymbol: entry.glyph))
+                                icon: cgIcon, fallbackSymbol: entry.glyph))
         }
         return out
+        #else
+        return []
+        #endif
     }
 }

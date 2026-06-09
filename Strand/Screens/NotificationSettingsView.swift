@@ -1,5 +1,4 @@
 import SwiftUI
-import AppKit
 import StrandDesign
 
 /// Notifications — choose which Mac apps tap your wrist, and how.
@@ -152,7 +151,7 @@ struct NotificationSettingsView: View {
     private func appIcon(_ app: NotifApp) -> some View {
         Group {
             if let icon = app.icon {
-                Image(nsImage: icon)
+                Image(decorative: icon, scale: 1)
                     .resizable()
                     .interpolation(.high)
             } else {
