@@ -190,9 +190,8 @@ struct TrendsView: View {
         let cap = recovery.caption
         let isWide = recovery.widened
         return VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            VStack(alignment: .leading, spacing: 4) {
                 SegmentedPillControl(Range.allCases, selection: $range) { $0.label }
-                Spacer()
                 Text(rangeSubtitle).strandOverline()
             }
             Text(cap)

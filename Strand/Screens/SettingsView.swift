@@ -1,7 +1,9 @@
 import SwiftUI
-import AppKit
 import UniformTypeIdentifiers
 import StrandDesign
+#if os(macOS)
+import AppKit
+#endif
 import WhoopStore
 
 /// Settings — profile (powers zones / calories / recovery), strap connection, and about.
@@ -288,6 +290,7 @@ struct SettingsView: View {
 
     /// Flush the in-flight capture, then copy it to a user-chosen location via a save panel.
     private func exportPuffinCaptures() {
+        #if os(macOS)
         model.ble.flushPuffinCaptures()
         guard let src = live.puffinCaptureURL else { return }
         let panel = NSSavePanel()
@@ -304,13 +307,16 @@ struct SettingsView: View {
             backupAlertMessage = error.localizedDescription
             showBackupAlert = true
         }
+        #endif
     }
 
     /// Flush, then reveal the capture file in Finder so the user can grab it directly.
     private func revealPuffinCaptures() {
+        #if os(macOS)
         model.ble.flushPuffinCaptures()
         guard let url = live.puffinCaptureURL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
+        #endif
     }
 
     private var backupCard: some View {

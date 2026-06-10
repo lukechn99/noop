@@ -25,128 +25,107 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
 
     var id: String { rawValue }
 
-    /// Localized sidebar label. Each case maps to a string literal so Xcode extracts
-    /// it into the String Catalog as an English (US) base entry.
-    var titleKey: LocalizedStringKey {
-        switch self {
-        case .today: return "Today"
-        case .intelligence: return "Intelligence"
-        case .coach: return "Coach"
-        case .live: return "Live"
-        case .breathe: return "Breathe"
-        case .intervals: return "Intervals"
-        case .explore: return "Explore"
-        case .compare: return "Compare"
-        case .insights: return "Insights"
-        case .sleep: return "Sleep"
-        case .trends: return "Trends"
-        case .workouts: return "Workouts"
-        case .health: return "Health"
-        case .stress: return "Stress"
-        case .appleHealth: return "Apple Health"
-        case .dataSources: return "Data Sources"
-        case .notifications: return "Notifications"
-        case .automation: return "Automations"
-        case .settings: return "Settings"
-        case .support: return "Support"
-        }
-    }
+    var titleKey: LocalizedStringKey { LocalizedStringKey(rawValue) }
 
     var icon: String {
         switch self {
-        case .today: return "circle.hexagongrid.fill"
-        case .intelligence: return "brain.head.profile"
-        case .coach: return "sparkles"
-        case .live: return "waveform.path.ecg"
-        case .breathe: return "lungs.fill"
-        case .intervals: return "timer"
-        case .explore: return "square.grid.2x2.fill"
-        case .compare: return "chart.line.uptrend.xyaxis"
-        case .insights: return "lightbulb.fill"
-        case .sleep: return "moon.stars.fill"
-        case .trends: return "chart.xyaxis.line"
-        case .workouts: return "figure.run"
-        case .health: return "heart.text.square.fill"
-        case .stress: return "gauge.with.dots.needle.50percent"
-        case .appleHealth: return "heart.fill"
-        case .dataSources: return "square.and.arrow.down.fill"
+        case .today:         return "circle.hexagongrid.fill"
+        case .intelligence:  return "brain.head.profile"
+        case .coach:         return "sparkles"
+        case .live:          return "waveform.path.ecg"
+        case .breathe:       return "lungs.fill"
+        case .intervals:     return "timer"
+        case .explore:       return "square.grid.2x2.fill"
+        case .compare:       return "chart.line.uptrend.xyaxis"
+        case .insights:      return "lightbulb.fill"
+        case .sleep:         return "moon.stars.fill"
+        case .trends:        return "chart.xyaxis.line"
+        case .workouts:      return "figure.run"
+        case .health:        return "heart.text.square.fill"
+        case .stress:        return "gauge.with.dots.needle.50percent"
+        case .appleHealth:   return "heart.fill"
+        case .dataSources:   return "square.and.arrow.down.fill"
         case .notifications: return "bell.badge.fill"
-        case .automation: return "wand.and.stars"
-        case .settings: return "gearshape.fill"
-        case .support: return "heart.fill"
+        case .automation:    return "wand.and.stars"
+        case .settings:      return "gearshape.fill"
+        case .support:       return "heart.fill"
         }
     }
+
+    static let sections: [(title: String, items: [NavItem])] = [
+        ("Dashboard",  [.today, .intelligence, .coach]),
+        ("Live",       [.live, .breathe, .intervals]),
+        ("Metrics",    [.explore, .compare, .insights, .sleep, .trends, .workouts, .health, .stress, .appleHealth]),
+        ("Manage",     [.dataSources, .notifications, .automation, .settings, .support]),
+    ]
 }
 
 struct RootView: View {
-    // Observe only Repository (changes on data refresh, not the ~1 Hz HR/frame stream). The live
-    // status pill is isolated into SidebarStatus so HR/frame ticks don't re-render the whole
-    // NavigationSplitView shell + sidebar list.
     @EnvironmentObject var repo: Repository
-    @State private var selection: NavItem? = .today
 
     var body: some View {
-        NavigationSplitView {
-            VStack(spacing: 0) {
-                List(NavItem.allCases, selection: $selection) { item in
-                    Label(item.titleKey, systemImage: item.icon)
-                        .font(.system(size: 13, weight: .medium))
-                        .tag(item)
+        NavigationStack {
+            List {
+                ForEach(NavItem.sections, id: \.title) { section in
+                    Section(section.title) {
+                        ForEach(section.items) { item in
+                            NavigationLink(value: item) {
+                                Label(item.titleKey, systemImage: item.icon)
+                                    .font(.system(size: 15, weight: .medium))
+                            }
+                        }
+                    }
                 }
-                .listStyle(.sidebar)
-
-                Divider().overlay(StrandPalette.hairline)
-                SidebarStatus().padding(.horizontal, 14).padding(.vertical, 12)
             }
-            .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 280)
-            .safeAreaInset(edge: .top) { brand }
-        } detail: {
-            detail
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(StrandPalette.surfaceBase.ignoresSafeArea())
+            .listStyle(.insetGrouped)
+            .navigationTitle("NOOP")
+            .navigationBarTitleDisplayMode(.large)
+            .toolbarBackground(StrandPalette.surfaceBase, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
+            .safeAreaInset(edge: .bottom) {
+                ConnectionStatusBar()
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(StrandPalette.surfaceBase)
+            }
+            .navigationDestination(for: NavItem.self) { item in
+                detailView(for: item)
+                    .toolbarBackground(StrandPalette.surfaceBase, for: .navigationBar)
+                    .toolbarBackground(.visible, for: .navigationBar)
+            }
         }
         .task { await repo.refresh() }
     }
 
-    private var brand: some View {
-        HStack(spacing: 8) {
-            Text("NOOP")
-                .font(.system(size: 20, weight: .bold))
-                .foregroundStyle(StrandPalette.textPrimary)
-            Spacer()
-        }
-        .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 6)
-    }
-
-    @ViewBuilder private var detail: some View {
-        switch selection ?? .today {
-        case .today: TodayView()
-        case .intelligence: IntelligenceView()
-        case .coach: CoachView()
-        case .live: LiveView()
-        case .breathe: BreathingView()
-        case .intervals: IntervalTimerView()
-        case .explore: MetricExplorerView()
-        case .compare: CompareView()
-        case .insights: InsightsView()
-        case .sleep: SleepView()
-        case .trends: TrendsView()
-        case .workouts: WorkoutsView()
-        case .health: HealthView()
-        case .stress: StressView()
-        case .appleHealth: AppleHealthView()
-        case .dataSources: DataSourcesView()
+    @ViewBuilder private func detailView(for item: NavItem) -> some View {
+        switch item {
+        case .today:         TodayView()
+        case .intelligence:  IntelligenceView()
+        case .coach:         CoachView()
+        case .live:          LiveView()
+        case .breathe:       BreathingView()
+        case .intervals:     IntervalTimerView()
+        case .explore:       MetricExplorerView()
+        case .compare:       CompareView()
+        case .insights:      InsightsView()
+        case .sleep:         SleepView()
+        case .trends:        TrendsView()
+        case .workouts:      WorkoutsView()
+        case .health:        HealthView()
+        case .stress:        StressView()
+        case .appleHealth:   AppleHealthView()
+        case .dataSources:   DataSourcesView()
         case .notifications: NotificationSettingsView()
-        case .automation: AutomationsView()
-        case .settings: SettingsView()
-        case .support: SupportView()
+        case .automation:    AutomationsView()
+        case .settings:      SettingsView()
+        case .support:       SupportView()
         }
     }
 }
 
-/// Isolated live-status pill — owns the LiveState observation so the rest of RootView (sidebar
-/// list + detail) does not re-render on the ~1 Hz HR / frame stream.
-private struct SidebarStatus: View {
+/// Isolated connection status bar — owns the LiveState observation so the nav list
+/// doesn't re-render on the ~1 Hz HR / frame stream.
+private struct ConnectionStatusBar: View {
     @EnvironmentObject var live: LiveState
     var body: some View {
         HStack(spacing: 9) {

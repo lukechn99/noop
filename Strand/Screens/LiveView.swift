@@ -1,6 +1,8 @@
 import SwiftUI
-import AppKit
 import StrandDesign
+#if os(macOS)
+import AppKit
+#endif
 import WhoopProtocol
 
 /// Live — the connected strap in real time. Built on the shared design system
@@ -162,7 +164,7 @@ struct LiveView: View {
     // MARK: - Controls
 
     private var controls: some View {
-        HStack(spacing: 12) {
+        VStack(spacing: 10) {
             Button { model.scan(model: selectedModel) } label: {
                 Label(live.connected ? "Re-scan" : "Scan & Connect",
                       systemImage: "antenna.radiowaves.left.and.right")
@@ -170,20 +172,21 @@ struct LiveView: View {
             }
             .buttonStyle(.borderedProminent).tint(StrandPalette.accent)
 
-            Button { model.buzz() } label: {
-                Label("Buzz strap", systemImage: "waveform.path")
-                    .frame(maxWidth: .infinity).padding(.vertical, 8)
-            }
-            .buttonStyle(.bordered).tint(StrandPalette.accent)
-            .disabled(!activeConnection)
-            .help("Fire a test haptic buzz on the strap (requires an active strap connection)")
+            HStack(spacing: 10) {
+                Button { model.buzz() } label: {
+                    Label("Buzz strap", systemImage: "waveform.path")
+                        .frame(maxWidth: .infinity).padding(.vertical, 8)
+                }
+                .buttonStyle(.bordered).tint(StrandPalette.accent)
+                .disabled(!activeConnection)
 
-            Button(role: .destructive) { model.disconnect() } label: {
-                Label("Disconnect", systemImage: "xmark.circle")
-                    .frame(maxWidth: .infinity).padding(.vertical, 8)
+                Button(role: .destructive) { model.disconnect() } label: {
+                    Label("Disconnect", systemImage: "xmark.circle")
+                        .frame(maxWidth: .infinity).padding(.vertical, 8)
+                }
+                .buttonStyle(.bordered)
+                .disabled(!live.connected)
             }
-            .buttonStyle(.bordered)
-            .disabled(!live.connected)
         }
     }
 
@@ -240,15 +243,21 @@ struct LiveView: View {
     }
 
     private func copyStrapLog() {
+        #if os(macOS)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(strapLogText(), forType: .string)
+        #else
+        UIPasteboard.general.string = strapLogText()
+        #endif
     }
 
     private func saveStrapLog() {
+        #if os(macOS)
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "noop-strap-log.txt"
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
         try? strapLogText().write(to: url, atomically: true, encoding: .utf8)
+        #endif
     }
 }

@@ -256,10 +256,12 @@ struct CompareView: View {
             SectionHeader("Metrics", overline: "Overlay 2–4 signals")
             NoopCard {
                 VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                    HStack(alignment: .center) {
-                        SegmentedPillControl(CompareRange.allCases, selection: $range) { $0.label }
-                            .accessibilityLabel("Time range")
-                        Spacer()
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            SegmentedPillControl(CompareRange.allCases, selection: $range) { $0.label }
+                                .accessibilityLabel("Time range")
+                            Spacer(minLength: 0)
+                        }
                         addMenu
                     }
 

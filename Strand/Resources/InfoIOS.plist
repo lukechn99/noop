@@ -26,10 +26,16 @@
 	<string>16.0</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>NOOP connects directly to your WHOOP strap over Bluetooth to read heart rate, R-R intervals, battery, and sensor data locally on your iPhone. Nothing leaves your device.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>NOOP uses the camera to take photos when you double-tap your WHOOP strap.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>NOOP saves strap-triggered photos to your photo library.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>
 	</array>
+	<key>UILaunchScreen</key>
+	<dict/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

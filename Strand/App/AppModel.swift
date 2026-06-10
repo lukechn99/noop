@@ -2,6 +2,16 @@ import SwiftUI
 import Combine
 import WhoopProtocol
 import WhoopStore
+#if os(iOS)
+import UIKit
+#endif
+
+/// A running activity session started via double-tap. The view accumulates HR samples locally;
+/// this just carries the identity and start time.
+struct RunSession: Identifiable {
+    let id = UUID()
+    let startedAt: Date = Date()
+}
 
 /// Data source currently running an import from the Data Sources screen.
 enum DataSourceImportKind {
@@ -35,6 +45,14 @@ final class AppModel: ObservableObject {
 
     /// Timestamps of moments marked via a double-tap (persisted).
     @Published var moments: [Date] = []
+    /// iOS: present the in-app camera sheet.
+    @Published var showCamera = false
+    /// iOS: toggled each time a shutter trigger arrives while the camera is open.
+    @Published var cameraTrigger = false
+    /// iOS: present the run-activity sheet.
+    @Published var showRunActivity = false
+    /// iOS: the in-progress running session (nil when idle).
+    @Published var activeRun: RunSession?
     /// Illness/strain early-warning (recent RHR up + HRV down + skin-temp up vs baseline). nil = clear.
     @Published var healthAlert: String?
     private var lastDoubleTapAt: Date = .distantPast
@@ -224,8 +242,7 @@ final class AppModel: ObservableObject {
         runMacAction(behavior.doubleTapAction, shortcut: behavior.doubleTapShortcut)
     }
 
-    /// Run a configured Mac action. In-app actions (buzz/moment) stay on-device; lock + shortcuts
-    /// go through MacActions.
+    /// Run a configured action. In-app actions stay on-device; platform-specific ones are gated.
     func runMacAction(_ kind: MacActionKind, shortcut: String) {
         switch kind {
         case .none: break
@@ -238,9 +255,31 @@ final class AppModel: ObservableObject {
         case .runShortcut:
             #if os(macOS)
             MacActions.runShortcut(shortcut)
+            #else
+            openShortcut(named: shortcut)
+            #endif
+        case .takePhoto:
+            #if os(iOS)
+            if showCamera { cameraTrigger.toggle() }
+            else { showCamera = true }
+            #endif
+        case .startRun:
+            #if os(iOS)
+            activeRun = RunSession()
+            showRunActivity = true
             #endif
         }
     }
+
+    #if os(iOS)
+    private func openShortcut(named name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "shortcuts://run-shortcut?name=\(encoded)") else { return }
+        UIApplication.shared.open(url)
+    }
+    #endif
 
     /// Record a "moment" (double-tap marker) with a confirming buzz.
     func markMoment() {

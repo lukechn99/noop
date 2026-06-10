@@ -97,6 +97,9 @@ targets:
         MinimumOSVersion: "16.0"
         LSApplicationCategoryType: public.app-category.healthcare-fitness
         NSBluetoothAlwaysUsageDescription: "NOOP connects directly to your WHOOP strap over Bluetooth to read heart rate, R-R intervals, battery, and sensor data locally on your iPhone. Nothing leaves your device."
+        NSCameraUsageDescription: "NOOP uses the camera to take photos when you double-tap your WHOOP strap."
+        NSPhotoLibraryAddUsageDescription: "NOOP saves strap-triggered photos to your photo library."
+        UILaunchScreen: {}
         UIBackgroundModes:
           - bluetooth-central
         UISupportedInterfaceOrientations:
@@ -115,6 +118,7 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: NO
         SWIFT_STRICT_CONCURRENCY: minimal
+        TARGETED_DEVICE_FAMILY: "1"
     dependencies:
       - package: WhoopProtocol
       - package: WhoopStore

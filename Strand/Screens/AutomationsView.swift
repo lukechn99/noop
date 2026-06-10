@@ -10,9 +10,11 @@ struct AutomationsView: View {
 
     var body: some View {
         ScreenScaffold(title: "Automations",
-                       subtitle: "Make the strap do things — tap to act, walk away to lock, train by feel.") {
+                       subtitle: "Make the strap do things — tap to act, train by feel.") {
             doubleTapCard
+            #if os(macOS)
             wearCard
+            #endif
             coachingCard
             alarmCard
         }
@@ -22,13 +24,13 @@ struct AutomationsView: View {
 
     private var doubleTapCard: some View {
         Section2(icon: "hand.tap.fill", title: "Double-tap",
-                 blurb: "Double-tap the strap to trigger an action on this Mac. (The strap exposes a single double-tap gesture.)") {
+                 blurb: "Double-tap the strap to trigger an action. The strap exposes a single double-tap gesture.") {
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
                     Text("When I double-tap").font(StrandFont.body).foregroundStyle(StrandPalette.textPrimary)
                     Spacer()
                     Picker("", selection: $behavior.doubleTapAction) {
-                        ForEach(MacActionKind.allCases) { Text($0.label).tag($0) }
+                        ForEach(MacActionKind.availableActions) { Text($0.label).tag($0) }
                     }
                     .labelsHidden().fixedSize()
                 }

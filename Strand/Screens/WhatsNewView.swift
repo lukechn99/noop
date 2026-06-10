@@ -23,7 +23,6 @@ struct WhatsNewView: View {
             Divider().overlay(StrandPalette.hairline)
             footer
         }
-        .frame(width: 560, height: 640)
         .background(StrandPalette.surfaceBase)
     }
 

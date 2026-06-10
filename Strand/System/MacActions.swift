@@ -1,21 +1,25 @@
 import Foundation
 
-/// What a strap double-tap (or a wrist-off trigger) does on the Mac.
+/// What a strap double-tap (or a wrist-off trigger) does on the host device.
 enum MacActionKind: String, Codable, CaseIterable, Identifiable {
     case none
-    case lockScreen
+    case lockScreen    // macOS only
     case buzzBack
     case markMoment
     case runShortcut
+    case takePhoto     // iOS: open in-app camera; second tap fires shutter
+    case startRun      // iOS: start a running activity in NOOP
 
     var id: String { rawValue }
     var label: String {
         switch self {
         case .none:        return "Nothing"
         case .lockScreen:  return "Lock the Mac"
-        case .buzzBack:    return "Buzz back (confirm)"
+        case .buzzBack:    return "Buzz back"
         case .markMoment:  return "Mark a moment"
         case .runShortcut: return "Run a Shortcut…"
+        case .takePhoto:   return "Take a photo"
+        case .startRun:    return "Start a run"
         }
     }
     var symbol: String {
@@ -25,7 +29,18 @@ enum MacActionKind: String, Codable, CaseIterable, Identifiable {
         case .buzzBack:    return "waveform.path"
         case .markMoment:  return "mappin.and.ellipse"
         case .runShortcut: return "bolt.fill"
+        case .takePhoto:   return "camera.fill"
+        case .startRun:    return "figure.run"
         }
+    }
+
+    /// Actions available on the current platform (filters the picker).
+    static var availableActions: [MacActionKind] {
+        #if os(iOS)
+        [.none, .buzzBack, .markMoment, .takePhoto, .startRun, .runShortcut]
+        #else
+        [.none, .lockScreen, .buzzBack, .markMoment, .runShortcut]
+        #endif
     }
 }
 

@@ -158,44 +158,12 @@ struct SupportView: View {
     }
 }
 
-/// Hosts ``SupportView`` as a centred panel over a dimmed backdrop. Clicking anywhere
-/// outside the panel — or pressing Esc, or the ✕ — closes it. Taps on the panel itself
-/// are absorbed (the panel is opaque) so its controls keep working.
+/// Presents ``SupportView`` as a sheet.
 struct SupportModalOverlay: View {
     @Binding var isPresented: Bool
 
     var body: some View {
-        ZStack {
-            Rectangle()
-                .fill(Color.black.opacity(0.45))
-                .ignoresSafeArea()
-                .contentShape(Rectangle())
-                .onTapGesture { isPresented = false }
-
-            SupportView()
-                .frame(width: 560, height: 680)
-                .background(StrandPalette.surfaceBase,
-                            in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .strokeBorder(StrandPalette.hairline, lineWidth: 1)
-                )
-                .overlay(alignment: .topTrailing) {
-                    Button { isPresented = false } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 20))
-                            .foregroundStyle(StrandPalette.textTertiary)
-                            .padding(12)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Close")
-                    .accessibilityLabel("Close Support")
-                }
-                .shadow(color: Color.black.opacity(0.5), radius: 30, x: 0, y: 14)
-        }
-        #if os(macOS)
-        .onExitCommand { isPresented = false }
-        #endif
-        .transition(.opacity)
+        SupportView()
+            .sheet(isPresented: $isPresented) { SupportView() }
     }
 }

@@ -200,10 +200,13 @@ struct NotificationSettingsView: View {
         } label: {
             Image(systemName: "play.fill")
                 .font(.system(size: 11))
-                .frame(width: 24, height: 24)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(StrandPalette.surfaceInset, in: Capsule())
+                .overlay(Capsule().strokeBorder(StrandPalette.hairline, lineWidth: 1))
+                .foregroundStyle(StrandPalette.accent)
         }
-        .buttonStyle(.bordered)
-        .tint(StrandPalette.accent)
+        .buttonStyle(.plain)
         .disabled(!live.bonded)
         .help(live.bonded ? "Test \(app.name) buzz" : "Connect your strap to test")
         .accessibilityLabel("Test \(app.name) buzz")

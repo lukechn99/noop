@@ -18,7 +18,7 @@ struct ScreenScaffold<Content: View>: View {
                 }
                 content()
             }
-            .padding(28)
+            .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(StrandPalette.surfaceBase)
